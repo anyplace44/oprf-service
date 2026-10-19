@@ -1,0 +1,25 @@
+[package]
+name = "taceo-oprf-enclave-launcher"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Init target for the TACEO:OPRF key-gen Nitro Enclave: loopback, TCP<->vsock forwarding, key-gen supervision."
+readme.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "oprf-enclave-launcher"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+vsock = "0.5"
+
+[lints]
+workspace = true
