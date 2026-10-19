@@ -1,0 +1,26 @@
+name: Build and Push (oprf-enclave-host)
+
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'oprf-enclave-host-v*'
+
+permissions:
+  contents: read # Required for the checkout action
+  packages: write
+
+jobs:
+  workflow:
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: ./.github/workflows/build-and-push.yml
+    with:
+      image-name: oprf-enclave-host
+      dockerfile: build/Dockerfile.oprf-enclave-host
+    secrets:
+      AWS_ARCHIVE_ROLE: ${{ secrets.AWS_ARCHIVE_ROLE }}
+      AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}

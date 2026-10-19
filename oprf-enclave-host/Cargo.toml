@@ -1,0 +1,30 @@
+[package]
+name = "taceo-oprf-enclave-host"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Parent-side vsock proxy for the TACEO:OPRF key-gen Nitro Enclave."
+readme.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[[bin]]
+name = "oprf-enclave-host"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true, features = ["derive", "env"] }
+eyre.workspace = true
+metrics.workspace = true
+# Unreleased: the proxy landed in worldcoin/pontifex#64; switch to 3.1.0 once published.
+pontifex = { git = "https://github.com/worldcoin/pontifex", rev = "19647bd445ada4ab0b8127e1df5c3c03623b6ea1", default-features = false, features = ["proxy"] }
+telemetry-batteries = { workspace = true, features = ["metrics-statsd"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio-vsock = "0.7"
+tracing.workspace = true
+launcher = { package = "taceo-oprf-enclave-launcher", path = "../oprf-enclave-launcher" }
+
+[lints]
+workspace = true
