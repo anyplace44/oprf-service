@@ -102,6 +102,11 @@ fn boot(logs: &PipeWriter) -> Result<ExitCode, String> {
     drop(bootstrap);
     let config = EnclaveConfig::from_json(&plaintext)?;
     let table = combined_table(&alias_arn, &config)?;
+    log(&format!(
+        "config decrypted: {} environment keys, {} forwards",
+        config.environment.len(),
+        table.outbound.len() - 1 + table.inbound.len()
+    ));
     write_hosts(&table)?;
     // outbound[0] is the KMS forward started above.
     for o in table.outbound.into_iter().skip(1) {

@@ -105,13 +105,22 @@ async fn kms_decrypt(
         .ok_or_else(|| "KMS Decrypt: response has no CiphertextForRecipient".to_owned())
 }
 
-/// The SDK's rustls client, trusting only the Mozilla roots compiled in from
-/// `webpki-root-certs`. Its default would load the platform store, whose presence in the EIF
-/// is a property of the rootfs (and of `SSL_CERT_FILE`); a missing store only shows as a
-/// failed handshake.
+/// Common names of the Amazon Trust Services roots, the only roots KMS endpoints chain to.
+const KMS_ROOT_CNS: [&str; 5] = [
+    "Amazon Root CA 1",
+    "Amazon Root CA 2",
+    "Amazon Root CA 3",
+    "Amazon Root CA 4",
+    "Starfield Services Root Certificate Authority - G2",
+];
+
+/// The SDK's rustls client, trusting only the Amazon Trust Services roots, taken from the
+/// Mozilla roots compiled in by `webpki-root-certs`. Its default would load the platform store,
+/// whose presence in the EIF is a property of the rootfs (and of `SSL_CERT_FILE`); a missing
+/// store only shows as a failed handshake.
 fn http_client() -> Result<SharedHttpClient, String> {
     let mut roots = TrustStore::empty();
-    for der in webpki_root_certs::TLS_SERVER_ROOT_CERTS {
+    for der in kms_roots()? {
         // The trust store takes PEM only.
         roots.add_pem_certificate(format!(
             "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
@@ -126,4 +135,72 @@ fn http_client() -> Result<SharedHttpClient, String> {
         .tls_provider(Provider::Rustls(CryptoMode::AwsLc))
         .tls_context(context)
         .build_https())
+}
+
+/// One certificate per [`KMS_ROOT_CNS`] entry, matched by subject; an error names any that is
+/// missing.
+fn kms_roots() -> Result<Vec<&'static [u8]>, String> {
+    KMS_ROOT_CNS
+        .iter()
+        .map(|cn| {
+            webpki_root_certs::TLS_SERVER_ROOT_CERTS
+                .iter()
+                .find(|der| {
+                    webpki::anchor_from_trusted_cert(der)
+                        .is_ok_and(|anchor| subject_has_cn(&anchor.subject, cn))
+                })
+                .map(AsRef::as_ref)
+                .ok_or_else(|| format!("TLS root {cn:?} missing from webpki-root-certs"))
+        })
+        .collect()
+}
+
+/// Whether the DER `subject` (a Name's contents) holds the attribute `id-at-commonName = cn`
+/// as a `PrintableString` or `UTF8String`.
+fn subject_has_cn(subject: &[u8], cn: &str) -> bool {
+    let Some(len) = u8::try_from(cn.len()).ok().filter(|&l| l < 0x80) else {
+        return false;
+    };
+    [0x13, 0x0c].into_iter().any(|tag| {
+        let mut attr = vec![0x06, 0x03, 0x55, 0x04, 0x03, tag, len];
+        attr.extend_from_slice(cn.as_bytes());
+        subject.windows(attr.len()).any(|w| w == attr)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kms_roots_are_the_five_amazon_roots() {
+        let roots = kms_roots().expect("all roots present");
+        assert_eq!(roots.len(), KMS_ROOT_CNS.len(), "one certificate per name");
+        for (i, a) in roots.iter().enumerate() {
+            assert!(
+                roots[i + 1..].iter().all(|b| a != b),
+                "names select distinct certificates"
+            );
+        }
+    }
+
+    #[test]
+    fn common_name_must_match_exactly() {
+        let root = webpki_root_certs::TLS_SERVER_ROOT_CERTS
+            .iter()
+            .find(|der| {
+                webpki::anchor_from_trusted_cert(der)
+                    .is_ok_and(|a| subject_has_cn(&a.subject, "Amazon Root CA 1"))
+            })
+            .expect("Amazon Root CA 1");
+        let anchor = webpki::anchor_from_trusted_cert(root).expect("anchor");
+        assert!(
+            !subject_has_cn(&anchor.subject, "Amazon Root CA"),
+            "a prefix is not a match"
+        );
+        assert!(
+            !subject_has_cn(&anchor.subject, "Amazon Root CA 2"),
+            "another root's name is not a match"
+        );
+    }
 }
