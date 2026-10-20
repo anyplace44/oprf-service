@@ -42,7 +42,7 @@ FROM scratch AS runtime
 ARG GIT_HASH
 LABEL org.opencontainers.image.revision=$GIT_HASH
 LABEL org.opencontainers.image.vendor=TACEO
-LABEL org.opencontainers.image.source=https://github.com/TaceoLabs/oprf-service
+LABEL org.opencontainers.image.source=https://github.com/anyplace44/oprf-service
 LABEL org.opencontainers.image.description="OPRF key-gen enclave host proxy"
 USER 65532:65532
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/reproducible/oprf-enclave-host /oprf-enclave-host
