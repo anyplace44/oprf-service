@@ -2,4 +2,5 @@
 //! `oprf-enclave-host`, so both ends read the same file.
 #![deny(missing_docs)]
 
+pub mod bootstrap;
 pub mod table;
