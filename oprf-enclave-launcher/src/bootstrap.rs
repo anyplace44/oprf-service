@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::table::Table;
 
-/// Enclave vsock port the parent delivers the [`Bootstrap`] line to.
+/// Parent vsock port the enclave dials to fetch the [`Bootstrap`] line.
 pub const BOOTSTRAP_PORT: u32 = 7001;
 /// Parent vsock port the enclave streams its log lines to.
 pub const LOG_PORT: u32 = 7002;

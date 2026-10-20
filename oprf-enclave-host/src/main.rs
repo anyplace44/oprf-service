@@ -1,6 +1,7 @@
 //! Parent-side counterpart of `oprf-enclave-launcher`.
 //!
-//! Reads the same forward table as the enclave. Each `outbound` line becomes a
+//! Reads a forward table provided at run time: the KMS line first, then the
+//! forwards of the enclave's config blob. Each `outbound` line becomes a
 //! pontifex vsock-to-TCP proxy that only admits the enclave's CID; each
 //! `inbound` line becomes a TCP listener whose connections are relayed to the
 //! enclave over vsock.
