@@ -3,4 +3,5 @@
 #![deny(missing_docs)]
 
 pub mod bootstrap;
+pub mod recipient;
 pub mod table;
