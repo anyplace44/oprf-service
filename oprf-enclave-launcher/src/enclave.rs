@@ -1,4 +1,4 @@
-//! Enclave-side runtime: loopback, forwarders, key-gen.
+//! Enclave-side runtime: loopback, forwarders, the enclave app.
 
 use std::io::{self, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -9,18 +9,20 @@ use std::thread;
 
 use vsock::{VMADDR_CID_ANY, VsockListener, VsockStream};
 
+use crate::app::parse_app;
 use crate::relay::{Stream, relay};
 use taceo_oprf_enclave_launcher::table::{Inbound, Outbound, Table};
 
 const FORWARDS_PATH: &str = "/etc/enclave/forwards";
-const KEY_GEN_PATH: &str = "/app/taceo-oprf-key-gen";
-/// Same user and workdir as the OCI image (`USER 65532:65532`, `/app`).
+/// Absolute path of the program to run, written by the image's Dockerfile.
+const APP_PATH: &str = "/etc/enclave/app";
+/// Same user and workdir as the OCI images (`USER 65532:65532`, `/app`).
 #[allow(
     clippy::decimal_literal_representation,
-    reason = "must read the same as USER 65532:65532 in the Dockerfile"
+    reason = "must read the same as USER 65532:65532 in the Dockerfiles"
 )]
-const KEY_GEN_ID: u32 = 65532;
-const KEY_GEN_DIR: &str = "/app";
+const APP_ID: u32 = 65532;
+const APP_DIR: &str = "/app";
 /// Nitro's parent instance is CID 3 (nit's heartbeat dials it too), not
 /// `VMADDR_CID_HOST` (2).
 const PARENT_CID: u32 = 3;
@@ -43,33 +45,42 @@ pub(crate) fn log(msg: &str) {
 }
 
 pub(crate) fn run() -> ExitCode {
+    let app = match read_app() {
+        Ok(app) => app,
+        Err(err) => {
+            log(&format!("cannot read {APP_PATH}: {err}"));
+            return ExitCode::FAILURE;
+        }
+    };
     if let Err(err) = start_forwarding() {
         log(&format!("setup failed: {err}"));
         return ExitCode::FAILURE;
     }
-    log(&format!(
-        "starting {KEY_GEN_PATH} as {KEY_GEN_ID}:{KEY_GEN_ID}"
-    ));
+    log(&format!("starting {app} as {APP_ID}:{APP_ID}"));
     // The environment is the one nit read from /etc/environment. Setting the
     // uid as root also clears supplementary groups (std calls setgroups(0)).
-    let status = Command::new(KEY_GEN_PATH)
-        .uid(KEY_GEN_ID)
-        .gid(KEY_GEN_ID)
-        .current_dir(KEY_GEN_DIR)
+    let status = Command::new(&app)
+        .uid(APP_ID)
+        .gid(APP_ID)
+        .current_dir(APP_DIR)
         .status();
     match status {
         Ok(status) => {
-            log(&format!("key-gen exited: {status}"));
+            log(&format!("{app} exited: {status}"));
             status
                 .code()
                 .and_then(|c| u8::try_from(c).ok())
                 .map_or(ExitCode::FAILURE, ExitCode::from)
         }
         Err(err) => {
-            log(&format!("cannot start key-gen: {err}"));
+            log(&format!("cannot start {app}: {err}"));
             ExitCode::FAILURE
         }
     }
+}
+
+fn read_app() -> io::Result<String> {
+    parse_app(&std::fs::read_to_string(APP_PATH)?).map_err(io::Error::other)
 }
 
 fn start_forwarding() -> io::Result<()> {

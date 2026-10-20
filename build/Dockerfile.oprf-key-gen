@@ -19,7 +19,8 @@
 #     -f build/Dockerfile.oprf-key-gen .
 #
 # Build the AWS Nitro Enclave image (EIF) and its PCRs from the same rootfs,
-# with the enclave config in build/enclave/<ENCLAVE_CONFIG> (default example):
+# with the enclave config in build/enclave/<ENCLAVE_CONFIG> (default
+# key-gen-example):
 #   docker buildx build --platform linux/amd64 --no-cache \
 #     --build-arg GIT_HASH=$(git rev-parse HEAD) --target eif \
 #     --output type=local,dest=out-eif -f build/Dockerfile.oprf-key-gen .
@@ -126,11 +127,12 @@ COPY --from=core-ca-certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/cer
 # pins the EIF build time to 0, so EIF and PCRs are a function of the commit.
 # nit execs nit.target (oprf-enclave-launcher) as root with an empty argv,
 # cwd / and the environment from /etc/environment; the launcher sets up
-# networking from /etc/enclave/forwards and runs key-gen with that
-# environment. The image's USER/WORKDIR do not apply. Both files come from
-# build/enclave/${ENCLAVE_CONFIG} and are measured into PCR2.
+# networking from /etc/enclave/forwards and runs the binary named in
+# /etc/enclave/app (key-gen) with that environment. The image's USER/WORKDIR
+# do not apply. environment and forwards come from
+# build/enclave/${ENCLAVE_CONFIG}; all three are measured into PCR2.
 FROM scratch AS eif-builder
-ARG ENCLAVE_CONFIG=example
+ARG ENCLAVE_CONFIG=key-gen-example
 COPY --from=core-busybox . /
 COPY --from=core-findutils . /
 COPY --from=core-musl . /
@@ -149,7 +151,8 @@ ENV CMDLINE="reboot=k panic=30 pci=off nomodules console=ttyS0 i8042.noaux i8042
 # Context files keep the host's umask; COPY --chmod would also apply the
 # mode to the parent dirs it creates.
 RUN set -eu; \
-    chmod 0644 /rootfs/etc/environment /rootfs/etc/enclave/forwards; \
+    printf '%s\n' /app/taceo-oprf-key-gen > /rootfs/etc/enclave/app; \
+    chmod 0644 /rootfs/etc/environment /rootfs/etc/enclave/forwards /rootfs/etc/enclave/app; \
     mkdir /out; \
     printf '%s\n' 'dir /dev 0755 0 0' 'nod /dev/console 0600 0 0 c 5 1' \
         'file /init /nit 0755 0 0' > /bootstrap.list; \

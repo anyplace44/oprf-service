@@ -1,0 +1,17 @@
+# Example enclave config for oprf-node (placeholder hosts and values). Same
+# format and rules as build/enclave/key-gen-example/forwards: both files of a
+# config dir are measured into PCR2, so they hold no secrets; the Postgres
+# connection string is delivered at runtime (not yet implemented).
+# `environment` is passed to the node verbatim by nit, one KEY=VALUE per line,
+# so it cannot carry comments or blank lines.
+#
+# The node needs Postgres (secret manager) and the other nodes (NODE_URLS,
+# used to delegate requests over plain WebSocket); it does not talk to the
+# chain. Each NODE_URLS host needs an outbound line. Those listen on
+# 127.0.0.x:4321 inside the enclave, so the node binds 127.0.0.1:4321 (where
+# the inbound forward delivers) instead of 0.0.0.0:4321, which would clash.
+outbound db.example.internal 5432 8001
+outbound node0.example.internal 4321 8002
+outbound node1.example.internal 4321 8003
+outbound node2.example.internal 4321 8004
+inbound 4321 4321

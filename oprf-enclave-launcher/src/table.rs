@@ -28,7 +28,7 @@ pub struct Outbound {
 #[derive(Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Inbound {
-    /// Port key-gen listens on inside the enclave; the parent listens on it too.
+    /// Port the app listens on inside the enclave; the parent listens on it too.
     pub tcp_port: u16,
     /// Enclave vsock port the parent dials.
     pub vsock_port: u32,
@@ -205,5 +205,22 @@ mod tests {
         assert!(err.contains("line 2"), "{err}");
         let err = Table::parse("inbound 1 9001\ninbound 2 9001\n").expect_err("dup inbound vsock");
         assert!(err.contains("line 2"), "{err}");
+    }
+
+    #[test]
+    fn example_configs_parse() {
+        for (name, forwards) in [
+            (
+                "key-gen-example",
+                include_str!("../../build/enclave/key-gen-example/forwards"),
+            ),
+            (
+                "node-example",
+                include_str!("../../build/enclave/node-example/forwards"),
+            ),
+        ] {
+            let table = Table::parse(forwards).unwrap_or_else(|err| panic!("{name}: {err}"));
+            assert!(!table.inbound.is_empty(), "{name}: no inbound forward");
+        }
     }
 }

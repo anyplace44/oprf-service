@@ -14,6 +14,7 @@ This is a monorepo containing:
 * `oprf-core`: A crate implementing a verifiable OPRF based on the TwoHashDH OPRF construction + a threshold variant of it.
 * `oprf-dev-client`: A crate implementing common dev client functionality.
 * `oprf-key-gen`: A crate implementing a OPRF key generation instance.
+* `oprf-node`: The OPRF node binary (`taceo-oprf-node`), built on `oprf-service` with an example request authenticator.
 * `oprf-service`: A crate implementing a service lib for the OPRF service.
 * `oprf-test`: A crate containing the integration tests for the workspace.
 * `oprf-types`: A crate implementing types that are shared between client, service, and the blockchain.
@@ -71,6 +72,14 @@ You can then use the dev client to send requests using the following command:
 ```bash
 just run-dev-client test
 ```
+
+## Reproducible Images
+
+The key-gen and node images are built reproducibly on [StageX](https://stagex.tools): every input is pinned by digest and the build runs offline, so the image digest and the Nitro Enclave PCRs are a function of the git commit.
+
+* `build/Dockerfile.oprf-key-gen`, `build/Dockerfile.oprf-node`: OCI image (default target) and AWS Nitro Enclave image (`--target eif`, enclave config from `build/enclave/<ENCLAVE_CONFIG>`).
+* `build/Dockerfile.oprf-enclave-host`: parent-side vsock proxy for either enclave.
+* CI builds each image on two independent runners and only pushes when both agree (`build-and-push.yml`, `build-eif.yml`). The run summary has the command to rebuild an image or EIF and compare it.
 
 ## Secret Management
 

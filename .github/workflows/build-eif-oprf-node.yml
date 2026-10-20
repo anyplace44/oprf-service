@@ -1,0 +1,27 @@
+name: Build EIF (oprf-node)
+
+# See build-eif.yml. Not released yet: the EIF stays a run artifact.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'oprf-node-v*'
+  pull_request:
+    paths:
+      - 'build/**'
+      - 'oprf-enclave-launcher/**'
+      - 'oprf-node/**'
+      - '.github/workflows/build-eif.yml'
+      - '.github/workflows/build-eif-oprf-node.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  workflow:
+    uses: ./.github/workflows/build-eif.yml
+    with:
+      image-name: oprf-node
+      dockerfile: build/Dockerfile.oprf-node
+      enclave-config: node-example

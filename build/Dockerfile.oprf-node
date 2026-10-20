@@ -1,0 +1,152 @@
+# Reproducible build of the OPRF node image (taceo-oprf-node) on StageX
+# (https://stagex.tools), built like build/Dockerfile.oprf-key-gen: every input
+# is pinned by digest, the build runs offline after `cargo fetch`, and the
+# resulting image manifest digest is a function of the git commit.
+# linux/amd64 only.
+#
+# To reproduce a published image, use the commands in the "Build and Push" run
+# summary: they set up the pinned BuildKit (BUILDKIT_IMAGE in
+# .github/workflows/build-and-push.yml) and pass the workflow's labels, which
+# are part of the image config.
+#
+# Build without those labels, e.g. to compare two local builders (matches the
+# other builder, not the published digest):
+#   SOURCE_DATE_EPOCH=$(git log -1 --pretty=%ct) docker buildx build \
+#     --platform linux/amd64 --provenance=false --sbom=false --no-cache \
+#     --build-arg GIT_HASH=$(git rev-parse HEAD) \
+#     --output type=oci,dest=out,tar=false,rewrite-timestamp=true,force-compression=true \
+#     -f build/Dockerfile.oprf-node .
+#
+# Build the AWS Nitro Enclave image (EIF) and its PCRs from the same rootfs,
+# with the enclave config in build/enclave/<ENCLAVE_CONFIG> (default
+# node-example):
+#   docker buildx build --platform linux/amd64 --no-cache \
+#     --build-arg GIT_HASH=$(git rev-parse HEAD) --target eif \
+#     --output type=local,dest=out-eif -f build/Dockerfile.oprf-node .
+#
+# StageX release sx2026.09.0 (Rust 1.97.1); same digests as
+# Dockerfile.oprf-key-gen, bump all of them together.
+FROM docker.io/stagex/pallet-rust:sx2026.09.0@sha256:67f09a98d5b6f7dd99035fc81b2921c2f49f42cd5ac54f63120a3dd1db59b0d4 AS pallet-rust
+FROM docker.io/stagex/core-cmake:sx2026.09.0@sha256:75ab41e96e7142fbe667e36f482858ce190d3fe5e2bb29835cf1b153cff74d34 AS core-cmake
+FROM docker.io/stagex/core-make:sx2026.09.0@sha256:224e0158be845e591c1ebfedc3bda2495e7b45efff94674f9c5d6d8b08a59918 AS core-make
+FROM docker.io/stagex/core-ca-certificates:sx2026.09.0@sha256:fe24a3809eba30972b64ddd8b611a6494bebea7631f805d795cec4241f5a11c6 AS core-ca-certificates
+FROM docker.io/stagex/core-busybox:sx2026.09.0@sha256:a094d1b5ad06943713e75849248d7f89546d15a3e74f42ec5b8f02375fd3706d AS core-busybox
+FROM docker.io/stagex/core-findutils:sx2026.09.0@sha256:d13601b0ff403c44bc5a6504ebe1215302de88de95ba1a7a4fdaf3b4991c5350 AS core-findutils
+FROM docker.io/stagex/core-musl:sx2026.09.0@sha256:94f77e4b1841987a42efce52aac54dbf230c152cb55c62da1967189a2705df89 AS core-musl
+FROM docker.io/stagex/core-openssl:sx2026.09.0@sha256:0ea25b654c044622a62c0a8707123a9ca5c87b6ef39dc178e3fe6d972c7e690d AS core-openssl
+FROM docker.io/stagex/core-libunwind:sx2026.09.0@sha256:6310c829edc37d0b498c1d746cf9e43687d7f44dee2496ff8ab16978af3e9355 AS core-libunwind
+FROM docker.io/stagex/user-eif_build:sx2026.09.0@sha256:1c329e834913cd4df68e0ce1b7a4f51ae287799b60c1fc108f9b5af8b55e8cda AS user-eif_build
+FROM docker.io/stagex/user-gen_initramfs:sx2026.09.0@sha256:223eb15558fe25b828d12e030325b01682cf22e236e64c95b41222770c02429f AS user-gen_initramfs
+FROM docker.io/stagex/user-linux-nitro:sx2026.09.0@sha256:fa00898ee52d9c54b761287f05ed2968f88a06aa42b1b7a4b0bbc83ecb5a4f1c AS user-linux-nitro
+
+FROM pallet-rust AS toolchain
+# cmake + make for aws-lc-sys (rustls' crypto provider). It ships pregenerated
+# bindings for x86_64-unknown-linux-musl, so neither bindgen/libclang nor perl
+# is needed. Unlike key-gen, the node does not link jemalloc, so there are no
+# allocator configure values to pin.
+COPY --from=core-cmake . /
+COPY --from=core-make . /
+# The pallet provides clang/lld/mold but only exports CC & co. via /etc/profile
+# (login shells). Set them explicitly so cc-rs and cmake agree.
+ENV CC=clang CXX=clang++ AR=llvm-ar RANLIB=llvm-ranlib \
+    TZ=UTC LC_ALL=C \
+    CARGO_HOME=/cargo \
+    TARGET=x86_64-unknown-linux-musl
+# StageX's musl target defaults to dynamic linking; crt-static restores fully
+# static binaries. build-id=none removes the linker's build-id note.
+ENV RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
+# SOURCE_DATE_EPOCH=1 and CARGO_INCREMENTAL=0 are preset by the pallet.
+
+# Health check binary (statically linked, runs on scratch)
+FROM toolchain AS healthcheck-builder
+RUN cargo install simple-web-healthcheck --version 0.3.0 --locked \
+    --target "${TARGET}" --root /out \
+    --config 'profile.release.codegen-units=1'
+
+# Enclave init, patched as in Dockerfile.oprf-key-gen (see there).
+FROM toolchain AS nit-builder
+ADD --checksum=sha256:79555b0fd11f53d786be95b24ecd617d3b0fba95f95937cdd5bf400a2463536a \
+    https://git.distrust.co/public/nit/archive/00b5957d6e4849d397d1c398e8ebd7f2c29572db.tar.gz /nit.tar.gz
+WORKDIR /nit
+RUN tar -xzf /nit.tar.gz --strip-components=1 \
+ && sed -i 's/if let Some(s) = data_cs {/if let Some(s) = \&data_cs {/' crates/nit/src/system/syscall.rs \
+ && test "$(grep -c 'if let Some(s) = &data_cs {' crates/nit/src/system/syscall.rs)" = 1 \
+ && cargo fetch --locked --target "${TARGET}"
+RUN --network=none cargo build --frozen --locked --release --target "${TARGET}"
+
+FROM toolchain AS builder
+# Compiled into the binary via `nodes_common::version_info!()` (served on
+# /version). .git is not in the build context, so without this the fallback
+# `git describe` yields UNKNOWN. A function of the commit, hence deterministic.
+ARG GIT_HASH
+WORKDIR /app
+# look at .dockerignore if this does not copy what you want
+COPY . .
+# Fetch with network, build without. --target is required so RUSTFLAGS do not
+# apply to proc-macros and build scripts (crt-static breaks proc-macro dylibs).
+RUN cargo fetch --locked --target "${TARGET}"
+# -p scopes feature unification to the package: the node crate has only
+# normal dependencies, so dev-only features of the workspace (test-utils,
+# testcontainers, ...) cannot leak into the binary.
+RUN --network=none cargo build --frozen --locked --profile reproducible \
+    --target "${TARGET}" -p taceo-oprf-node --bin taceo-oprf-node
+RUN --network=none cargo build --frozen --locked --profile reproducible \
+    --target "${TARGET}" -p taceo-oprf-enclave-launcher
+
+# Files shared by the OCI image and the EIF.
+FROM scratch AS rootfs
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/reproducible/taceo-oprf-node /app/taceo-oprf-node
+COPY --from=core-ca-certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+
+# Same layout as the key-gen EIF (see Dockerfile.oprf-key-gen): nit in the
+# first ramdisk (PCR1 with kernel and cmdline), the rootfs plus launcher and
+# enclave config in the second (PCR2). The launcher runs the binary named in
+# /etc/enclave/app (the node) as 65532:65532 in /app with the environment
+# from /etc/environment. environment and forwards come from
+# build/enclave/${ENCLAVE_CONFIG}; all three are measured into PCR2.
+FROM scratch AS eif-builder
+ARG ENCLAVE_CONFIG=node-example
+COPY --from=core-busybox . /
+COPY --from=core-findutils . /
+COPY --from=core-musl . /
+COPY --from=core-openssl . /
+COPY --from=core-libunwind . /
+COPY --from=user-eif_build . /
+COPY --from=user-gen_initramfs . /
+COPY --from=user-linux-nitro /bzImage /linux.config /kernel/
+COPY --from=nit-builder /nit/target/x86_64-unknown-linux-musl/release/nit /nit
+COPY --from=rootfs / /rootfs/
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/reproducible/oprf-enclave-launcher /rootfs/app/oprf-enclave-launcher
+COPY build/enclave/${ENCLAVE_CONFIG}/environment /rootfs/etc/environment
+COPY build/enclave/${ENCLAVE_CONFIG}/forwards /rootfs/etc/enclave/forwards
+# AWS's default enclave cmdline (aws-nitro-enclaves-cli blobs/x86_64/cmdline).
+ENV CMDLINE="reboot=k panic=30 pci=off nomodules console=ttyS0 i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd random.trust_cpu=on nit.target=/app/oprf-enclave-launcher"
+# Context files keep the host's umask; COPY --chmod would also apply the
+# mode to the parent dirs it creates.
+RUN set -eu; \
+    printf '%s\n' /app/taceo-oprf-node > /rootfs/etc/enclave/app; \
+    chmod 0644 /rootfs/etc/environment /rootfs/etc/enclave/forwards /rootfs/etc/enclave/app; \
+    mkdir /out; \
+    printf '%s\n' 'dir /dev 0755 0 0' 'nod /dev/console 0600 0 0 c 5 1' \
+        'file /init /nit 0755 0 0' > /bootstrap.list; \
+    gen_initramfs -o /out/bootstrap.cpio -d @0 /bootstrap.list; \
+    gen_initramfs -o /out/app.cpio -d @0 -u squash -g squash /rootfs; \
+    eif_build --kernel /kernel/bzImage --kernel_config /kernel/linux.config \
+        --cmdline "$CMDLINE" --name oprf-node \
+        --ramdisk /out/bootstrap.cpio --ramdisk /out/app.cpio \
+        --output /out/oprf-node.eif --pcrs_output /out/oprf-node.pcrs
+
+FROM scratch AS eif
+COPY --from=eif-builder /out/oprf-node.eif /out/oprf-node.pcrs /
+
+FROM rootfs AS runtime
+ARG GIT_HASH
+LABEL org.opencontainers.image.revision=$GIT_HASH
+LABEL org.opencontainers.image.vendor=TACEO
+LABEL org.opencontainers.image.source=https://github.com/TaceoLabs/oprf-service
+LABEL org.opencontainers.image.description="OPRF node"
+WORKDIR /app
+USER 65532:65532
+COPY --from=healthcheck-builder /out/bin/simple-web-healthcheck /healthcheck
+
+ENTRYPOINT [ "/app/taceo-oprf-node" ]

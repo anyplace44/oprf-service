@@ -1,8 +1,10 @@
-# Parent-side proxy for the oprf-key-gen Nitro Enclave (oprf-enclave-host),
-# built like build/Dockerfile.oprf-key-gen: StageX, digest-pinned, offline
-# after `cargo fetch`. The image is not measured into the enclave's PCRs, but
-# it carries the forward table that must match the EIF's, so both are built
-# from build/enclave/<ENCLAVE_CONFIG> (default example) at the same commit.
+# Parent-side proxy for the OPRF Nitro Enclaves (oprf-enclave-host), built
+# like build/Dockerfile.oprf-key-gen: StageX, digest-pinned, offline after
+# `cargo fetch`. The image is not measured into the enclave's PCRs, but it
+# carries the forward table that must match the EIF's, so both are built from
+# build/enclave/<ENCLAVE_CONFIG> at the same commit (default key-gen-example;
+# --build-arg ENCLAVE_CONFIG=node-example for the oprf-node enclave, or mount
+# the table and point OPRF_ENCLAVE_HOST_FORWARDS at it).
 #
 # Run on the parent instance. Docker's default seccomp profile rejects
 # AF_VSOCK sockets (bind fails with EPERM); build/enclave/seccomp-vsock.json is
@@ -23,7 +25,7 @@ FROM pallet-rust AS builder
 ENV TZ=UTC LC_ALL=C \
     CARGO_HOME=/cargo \
     TARGET=x86_64-unknown-linux-musl
-# Static binary without a build-id note, as for key-gen.
+# Static binary without a build-id note, as for key-gen and node.
 ENV RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
 WORKDIR /app
 COPY . .
@@ -35,7 +37,7 @@ RUN --network=none cargo build --frozen --locked --profile reproducible \
 
 # Context files keep the host's umask and mtime; normalise both.
 FROM pallet-rust AS forwards
-ARG ENCLAVE_CONFIG=example
+ARG ENCLAVE_CONFIG=key-gen-example
 COPY build/enclave/${ENCLAVE_CONFIG}/forwards /etc/enclave/forwards
 RUN chmod 0644 /etc/enclave/forwards && touch -d @0 /etc/enclave/forwards
 
@@ -44,7 +46,7 @@ ARG GIT_HASH
 LABEL org.opencontainers.image.revision=$GIT_HASH
 LABEL org.opencontainers.image.vendor=TACEO
 LABEL org.opencontainers.image.source=https://github.com/TaceoLabs/oprf-service
-LABEL org.opencontainers.image.description="OPRF key-gen enclave host proxy"
+LABEL org.opencontainers.image.description="OPRF enclave host proxy"
 USER 65532:65532
 COPY --from=forwards /etc/enclave/forwards /etc/enclave/forwards
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/reproducible/oprf-enclave-host /oprf-enclave-host
