@@ -173,7 +173,7 @@ FROM rootfs AS runtime
 ARG GIT_HASH
 LABEL org.opencontainers.image.revision=$GIT_HASH
 LABEL org.opencontainers.image.vendor=TACEO
-LABEL org.opencontainers.image.source=https://github.com/TaceoLabs/oprf-service
+LABEL org.opencontainers.image.source=https://github.com/anyplace44/oprf-service
 LABEL org.opencontainers.image.description="OPRF key gen"
 WORKDIR /app
 USER 65532:65532
