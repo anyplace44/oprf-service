@@ -6,6 +6,9 @@
 
 #[cfg(target_os = "linux")]
 mod enclave;
+#[cfg(target_os = "linux")]
+#[allow(dead_code, reason = "called by enclave.rs from Task A5")]
+mod kms;
 #[cfg_attr(
     not(test),
     allow(dead_code, reason = "used by enclave.rs from Task A5")

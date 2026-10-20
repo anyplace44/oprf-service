@@ -124,6 +124,18 @@ impl EnclaveConfig {
 ///
 /// `alias_arn` is not `arn:aws:kms:<region>:<account>:alias/<name>`.
 pub fn kms_forward_line(alias_arn: &str) -> Result<String, String> {
+    let region = kms_region(alias_arn)?;
+    Ok(format!(
+        "outbound kms.{region}.amazonaws.com 443 {KMS_VSOCK_PORT}"
+    ))
+}
+
+/// The region of a KMS alias ARN.
+///
+/// # Errors
+///
+/// `alias_arn` is not `arn:aws:kms:<region>:<account>:alias/<name>`.
+pub fn kms_region(alias_arn: &str) -> Result<&str, String> {
     let bad = || format!("not a KMS alias ARN: {alias_arn:?}");
     let parts: Vec<&str> = alias_arn.split(':').collect();
     let ["arn", "aws", "kms", region, account, resource] = parts.as_slice() else {
@@ -139,9 +151,7 @@ pub fn kms_forward_line(alias_arn: &str) -> Result<String, String> {
     if !valid_region || account.is_empty() || !valid_alias {
         return Err(bad());
     }
-    Ok(format!(
-        "outbound kms.{region}.amazonaws.com 443 {KMS_VSOCK_PORT}"
-    ))
+    Ok(region)
 }
 
 /// The KMS line followed by the blob's forwards, parsed as one table.
@@ -220,6 +230,7 @@ mod tests {
 
     #[test]
     fn kms_line_from_alias_arn() {
+        assert_eq!(kms_region(ARN), Ok("eu-central-1"));
         assert_eq!(
             kms_forward_line(ARN),
             Ok("outbound kms.eu-central-1.amazonaws.com 443 8000".to_owned())
