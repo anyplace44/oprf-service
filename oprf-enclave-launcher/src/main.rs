@@ -7,6 +7,11 @@
 #[cfg(target_os = "linux")]
 mod enclave;
 #[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "used by enclave.rs from Task A5")
+)]
+mod logpump;
+#[cfg_attr(
     not(target_os = "linux"),
     allow(dead_code, reason = "only the Linux runtime uses it outside tests")
 )]
