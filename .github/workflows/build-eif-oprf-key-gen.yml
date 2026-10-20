@@ -142,13 +142,14 @@ jobs:
           sha=$(sha256sum oprf-key-gen.eif | cut -d' ' -f1)
           kms=$(sed -n 's/^ARG KMS_KEY_ALIAS_ARN=//p' "$GITHUB_WORKSPACE/build/Dockerfile.oprf-key-gen")
           [ -n "$kms" ] || { echo "::error::KMS alias ARN not found in Dockerfile" >&2; exit 1; }
-          pcr0=$(sed -n 's/^PCR0 *//p' oprf-key-gen.pcrs)
-          [ -n "$pcr0" ] || { echo "::error::PCR0 not found in oprf-key-gen.pcrs" >&2; exit 1; }
+          pcr0=$(awk '$2=="PCR0"{print $1}' oprf-key-gen.pcrs)
+          [[ "$pcr0" =~ ^[0-9a-f]{96}$ ]] || { echo "::error::no valid PCR0 in oprf-key-gen.pcrs" >&2; exit 1; }
           {
             echo "Reproducible Nitro Enclave image of oprf-key-gen, built on two independent runners with identical EIF and PCRs."
             echo
-            echo "- eif_sha256: \`$sha\`"
-            echo "- PCR0: \`$pcr0\`"
+            echo "eif_sha256=$sha"
+            echo "eif_pcr0=$pcr0"
+            echo
             echo "- KMS alias the EIF trusts (build default): \`$kms\`"
             echo
             echo "The PCRs only hold for that KMS alias ARN. Full PCRs are in \`oprf-key-gen.pcrs\`."
