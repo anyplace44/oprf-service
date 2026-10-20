@@ -112,16 +112,25 @@ jobs:
           {
             echo "### $NAME EIF (config \`$ENCLAVE_CONFIG\`)"
             echo
-            echo "Reproducible across two runners. sha256: \`$(sha256sum "$eif/$NAME.eif" | cut -d' ' -f1)\`"
+            echo "Reproducible across two runners:"
+            echo
+            echo "| File | sha256 |"
+            echo "| --- | --- |"
+            echo "| \`$NAME.eif\` | \`$(sha256sum "$eif/$NAME.eif" | cut -d' ' -f1)\` |"
+            echo "| \`$NAME.pcrs\` | \`$(sha256sum "$eif/$NAME.pcrs" | cut -d' ' -f1)\` |"
+            echo
+            echo "PCRs, the contents of \`$NAME.pcrs\`. The file is in this run's \`$NAME-eif-primary\` artifact, and in \`out-eif/$NAME.pcrs\` after a rebuild:"
             echo
             echo '```'
             cat "$eif/$NAME.pcrs"
             echo
             echo '```'
             echo
-            echo "Rebuild from a checkout of \`${{ github.sha }}\` (with LFS files) with a builder on BuildKit \`$BUILDKIT_IMAGE\`:"
+            echo "Rebuild from a checkout of \`${{ github.sha }}\` (with LFS files) with a builder on BuildKit \`$BUILDKIT_IMAGE\`, then compare the hashes and PCRs with the ones above:"
             echo
             echo '```sh'
             echo "docker buildx build --platform linux/amd64 --no-cache --build-arg GIT_HASH=${{ github.sha }} --build-arg ENCLAVE_CONFIG=$ENCLAVE_CONFIG --target eif --output type=local,dest=out-eif -f $DOCKERFILE ."
+            echo "sha256sum out-eif/*"
+            echo "cat out-eif/$NAME.pcrs"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
