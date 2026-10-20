@@ -4,7 +4,7 @@
 use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, TrySendError};
+use std::sync::mpsc::{self, SyncSender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -45,6 +45,24 @@ impl PumpHandle {
     }
 }
 
+/// Longest line forwarded; the rest of a longer line is discarded, so
+/// untrusted output cannot make the queue grow without bound.
+const MAX_LINE: usize = 16 * 1024;
+
+/// Queues the finished line (always newline-terminated, valid UTF-8) or
+/// counts it as dropped when the queue is full or the writer is gone.
+fn emit(tx: &SyncSender<String>, c: &Counters, line: &mut Vec<u8>, truncated: &mut bool) {
+    let mut text = String::from_utf8_lossy(line).into_owned();
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    line.clear();
+    *truncated = false;
+    if tx.try_send(text).is_err() {
+        c.dropped.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// Reads lines from `lines` into a bounded queue (dropping on overflow) while a
 /// second thread writes them to whatever `connect` returns. The reader never
 /// waits on the sink. `connect` must bound its writes with a timeout.
@@ -59,24 +77,32 @@ where
 
     let c = Arc::clone(&counters);
     let reader = thread::spawn(move || {
-        let mut buf = Vec::new();
+        let mut line = Vec::new();
+        let mut truncated = false;
         loop {
-            buf.clear();
-            match lines.read_until(b'\n', &mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
+            let chunk = match lines.fill_buf() {
+                Ok([]) => break,
+                Ok(chunk) => chunk,
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                // A persistent read error would spin forever; the pipe is gone.
+                Err(_) => break,
+            };
+            let (take, complete) = match chunk.iter().position(|&b| b == b'\n') {
+                Some(i) => (i + 1, true),
+                None => (chunk.len(), false),
+            };
+            let room = MAX_LINE.saturating_sub(line.len());
+            if take > room {
+                truncated = true;
             }
-            let mut line = String::from_utf8_lossy(&buf).into_owned();
-            if !line.ends_with('\n') {
-                line.push('\n');
+            line.extend_from_slice(&chunk[..take.min(room)]);
+            lines.consume(take);
+            if complete {
+                emit(&tx, &c, &mut line, &mut truncated);
             }
-            match tx.try_send(line) {
-                Ok(()) => {}
-                Err(TrySendError::Full(_)) => {
-                    c.dropped.fetch_add(1, Ordering::Relaxed);
-                }
-                Err(TrySendError::Disconnected(_)) => break,
-            }
+        }
+        if !line.is_empty() || truncated {
+            emit(&tx, &c, &mut line, &mut truncated);
         }
         c.reader_done.store(true, Ordering::Release);
     });
@@ -133,7 +159,8 @@ mod tests {
     use super::*;
     use std::io::{Cursor, Read};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::mpsc;
+    use std::sync::atomic::AtomicU64;
+    use std::sync::{Mutex, mpsc};
     use std::thread;
     use std::time::Duration;
 
@@ -249,6 +276,110 @@ mod tests {
             );
             assert_eq!(stats.delivered, 2, "stats: {stats:?}");
             assert_eq!(sink.join().expect("sink"), "b\nc\n");
+        });
+    }
+
+    /// Cloneable in-memory sink.
+    #[derive(Clone, Default)]
+    struct Shared(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Shared {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            self.0.lock().expect("lock").extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn overlong_line_is_truncated_and_following_lines_survive() {
+        with_deadline(|| {
+            let sink = Shared::default();
+            let s = sink.clone();
+            let mut data = vec![b'x'; 4 * 1024 * 1024];
+            data.extend_from_slice(b"\nnext\n");
+            data.extend_from_slice(&vec![b'y'; 100_000]);
+            let stats = spawn_pump(
+                Cursor::new(data),
+                move || Ok(s.clone()),
+                opts(Duration::ZERO),
+            )
+            .join();
+            let got = String::from_utf8(sink.0.lock().expect("lock").clone()).expect("utf8");
+            let got: Vec<&str> = got.split_inclusive('\n').collect();
+            assert_eq!(stats.delivered, 3, "stats: {stats:?}");
+            assert_eq!(got.len(), 3, "lines: {}", got.len());
+            assert!(got[0].len() <= MAX_LINE + 1, "first line is capped");
+            assert!(got[0].starts_with("xxx"), "first line keeps its head");
+            assert_eq!(got[1], "next\n", "line after a truncated one is intact");
+            assert!(got[2].len() <= MAX_LINE + 1, "unterminated tail is capped");
+            assert!(
+                got[2].ends_with('\n'),
+                "unterminated tail still gets a newline"
+            );
+        });
+    }
+
+    /// Writer whose first write blocks until `gate` is released.
+    struct Gated {
+        gate: mpsc::Receiver<()>,
+        entered: mpsc::Sender<()>,
+        first: bool,
+        written: Arc<AtomicU64>,
+    }
+
+    impl Write for Gated {
+        fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+            if std::mem::take(&mut self.first) {
+                self.entered.send(()).unwrap_or_default();
+                self.gate.recv().unwrap_or_default();
+            }
+            self.written.fetch_add(1, Ordering::Relaxed);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn buffering_is_bounded_by_queue_while_writer_is_blocked() {
+        with_deadline(|| {
+            let (gate_tx, gate) = mpsc::channel();
+            let (entered_tx, entered) = mpsc::channel();
+            let written = Arc::new(AtomicU64::new(0));
+            let w = Arc::clone(&written);
+            let mut gated = Some(Gated {
+                gate,
+                entered: entered_tx,
+                first: true,
+                written: w,
+            });
+            let (n, queue) = (5_000_u64, 16);
+            let handle = spawn_pump(
+                Cursor::new("l\n".repeat(5_000).into_bytes()),
+                move || gated.take().ok_or_else(|| io::ErrorKind::Other.into()),
+                PumpOpts {
+                    queue,
+                    retry: Duration::ZERO,
+                },
+            );
+            entered.recv().expect("writer reached the sink");
+            while !handle.counters.reader_done.load(Ordering::Acquire) {
+                thread::yield_now();
+            }
+            // Reader finished while the writer is still stuck in its first write.
+            let dropped = handle.counters.dropped.load(Ordering::Relaxed);
+            assert!(
+                dropped >= n - queue as u64 - 1,
+                "at most queue + 1 in flight were ever accepted: dropped {dropped}"
+            );
+            drop(gate_tx);
+            let stats = handle.join();
+            assert_eq!(stats.delivered + stats.dropped, n, "stats: {stats:?}");
+            assert!(stats.delivered <= queue as u64 + 1, "stats: {stats:?}");
         });
     }
 }
