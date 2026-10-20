@@ -6862,6 +6862,7 @@ dependencies = [
  "aws-smithy-http-client",
  "base64 0.23.1",
  "libc",
+ "rustls-webpki",
  "serde",
  "serde_json",
  "tokio",
