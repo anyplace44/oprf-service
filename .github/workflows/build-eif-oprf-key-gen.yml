@@ -22,7 +22,6 @@ permissions:
 env:
   # Same pin as build-and-push.yml; bump both together.
   BUILDKIT_IMAGE: moby/buildkit:v0.33.1@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
-  ENCLAVE_CONFIG: example
 
 jobs:
   build:
@@ -62,7 +61,6 @@ jobs:
           no-cache: true
           build-args: |
             GIT_HASH=${{ github.sha }}
-            ENCLAVE_CONFIG=${{ env.ENCLAVE_CONFIG }}
           outputs: type=local,dest=${{ runner.temp }}/eif
 
       - name: Upload EIF
@@ -100,7 +98,7 @@ jobs:
         run: |
           eif="${{ runner.temp }}/in/oprf-key-gen-eif-primary"
           {
-            echo "### oprf-key-gen EIF (config \`$ENCLAVE_CONFIG\`)"
+            echo "### oprf-key-gen EIF"
             echo
             echo "Reproducible across two runners. sha256: \`$(sha256sum "$eif/oprf-key-gen.eif" | cut -d' ' -f1)\`"
             echo
@@ -112,6 +110,6 @@ jobs:
             echo "Rebuild from a checkout of \`${{ github.sha }}\` (with LFS files) with a builder on BuildKit \`$BUILDKIT_IMAGE\`:"
             echo
             echo '```sh'
-            echo "docker buildx build --platform linux/amd64 --no-cache --build-arg GIT_HASH=${{ github.sha }} --build-arg ENCLAVE_CONFIG=$ENCLAVE_CONFIG --target eif --output type=local,dest=out-eif -f build/Dockerfile.oprf-key-gen ."
+            echo "docker buildx build --platform linux/amd64 --no-cache --build-arg GIT_HASH=${{ github.sha }} --target eif --output type=local,dest=out-eif -f build/Dockerfile.oprf-key-gen ."
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

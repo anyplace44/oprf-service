@@ -18,8 +18,9 @@
 #     --output type=oci,dest=out,tar=false,rewrite-timestamp=true,force-compression=true \
 #     -f build/Dockerfile.oprf-key-gen .
 #
-# Build the AWS Nitro Enclave image (EIF) and its PCRs from the same rootfs,
-# with the enclave config in build/enclave/<ENCLAVE_CONFIG> (default example):
+# Build the AWS Nitro Enclave image (EIF) and its PCRs from the same rootfs.
+# The EIF carries no environment: it trusts the KMS key behind
+# KMS_KEY_ALIAS_ARN (default taceo-dev's) and receives its config at boot.
 #   docker buildx build --platform linux/amd64 --no-cache \
 #     --build-arg GIT_HASH=$(git rev-parse HEAD) --target eif \
 #     --output type=local,dest=out-eif -f build/Dockerfile.oprf-key-gen .
@@ -125,12 +126,15 @@ COPY --from=core-ca-certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/cer
 # uid/gid, mtime (-d @0) and sequential inode numbers, and eif_build 0.2.2
 # pins the EIF build time to 0, so EIF and PCRs are a function of the commit.
 # nit execs nit.target (oprf-enclave-launcher) as root with an empty argv,
-# cwd / and the environment from /etc/environment; the launcher sets up
-# networking from /etc/enclave/forwards and runs key-gen with that
-# environment. The image's USER/WORKDIR do not apply. Both files come from
-# build/enclave/${ENCLAVE_CONFIG} and are measured into PCR2.
+# cwd / and an empty environment (there is no /etc/environment). The
+# launcher fetches the KMS-encrypted config from the parent, decrypts it
+# with an attestation under the alias ARN in /etc/enclave/kms-key-alias, and
+# runs key-gen with exactly the config's environment and forwards. The
+# image's USER/WORKDIR do not apply. The ARN and the RDS CA bundle
+# (/etc/enclave/rds-ca.pem, pinned by sha256; AWS updates it, so a checksum
+# failure means refetch, re-verify, bump) are measured into PCR2.
 FROM scratch AS eif-builder
-ARG ENCLAVE_CONFIG=example
+ARG KMS_KEY_ALIAS_ARN=arn:aws:kms:eu-central-1:575490177671:alias/oprf-nitro-enclave
 COPY --from=core-busybox . /
 COPY --from=core-findutils . /
 COPY --from=core-musl . /
@@ -142,14 +146,16 @@ COPY --from=user-linux-nitro /bzImage /linux.config /kernel/
 COPY --from=nit-builder /nit/target/x86_64-unknown-linux-musl/release/nit /nit
 COPY --from=rootfs / /rootfs/
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/reproducible/oprf-enclave-launcher /rootfs/app/oprf-enclave-launcher
-COPY build/enclave/${ENCLAVE_CONFIG}/environment /rootfs/etc/environment
-COPY build/enclave/${ENCLAVE_CONFIG}/forwards /rootfs/etc/enclave/forwards
+ADD --checksum=sha256:90a6f1a7978a1b1b096dca6c57511ca48d3b8cf052f8e704baf358f34ea2f21b \
+    https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /rootfs/etc/enclave/rds-ca.pem
 # AWS's default enclave cmdline (aws-nitro-enclaves-cli blobs/x86_64/cmdline).
 ENV CMDLINE="reboot=k panic=30 pci=off nomodules console=ttyS0 i8042.noaux i8042.nomux i8042.nopnp i8042.dumbkbd random.trust_cpu=on nit.target=/app/oprf-enclave-launcher"
-# Context files keep the host's umask; COPY --chmod would also apply the
-# mode to the parent dirs it creates.
+# ADD keeps the server's mtime; ADD --chmod would also apply the mode to the
+# parent dirs it creates.
 RUN set -eu; \
-    chmod 0644 /rootfs/etc/environment /rootfs/etc/enclave/forwards; \
+    printf '%s\n' "$KMS_KEY_ALIAS_ARN" > /rootfs/etc/enclave/kms-key-alias; \
+    chmod 0644 /rootfs/etc/enclave/kms-key-alias /rootfs/etc/enclave/rds-ca.pem; \
+    touch -d @0 /rootfs/etc/enclave/kms-key-alias /rootfs/etc/enclave/rds-ca.pem; \
     mkdir /out; \
     printf '%s\n' 'dir /dev 0755 0 0' 'nod /dev/console 0600 0 0 c 5 1' \
         'file /init /nit 0755 0 0' > /bootstrap.list; \

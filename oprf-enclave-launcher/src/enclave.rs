@@ -1,18 +1,29 @@
-//! Enclave-side runtime: loopback, forwarders, key-gen.
+//! Enclave-side runtime: log pump, KMS-delivered config, forwarders, key-gen.
 
-use std::io::{self, Write};
+use std::collections::BTreeMap;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, PipeWriter, Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
+use std::panic::{self, AssertUnwindSafe};
 use std::process::{Command, ExitCode};
+use std::sync::mpsc;
 use std::thread;
+use std::time::Duration;
 
 use vsock::{VMADDR_CID_ANY, VsockListener, VsockStream};
 
+use crate::kms::decrypt_config;
+use crate::logpump::{PumpHandle, PumpOpts, spawn_pump};
 use crate::relay::{Stream, relay};
+use taceo_oprf_enclave_launcher::bootstrap::{
+    BOOTSTRAP_PORT, Bootstrap, EnclaveConfig, LOG_PORT, combined_table, kms_forward_line,
+};
 use taceo_oprf_enclave_launcher::table::{Inbound, Outbound, Table};
 
-const FORWARDS_PATH: &str = "/etc/enclave/forwards";
+/// Baked into the EIF (build arg `KMS_KEY_ALIAS_ARN`), so measured into PCR2.
+const KMS_KEY_ALIAS_PATH: &str = "/etc/enclave/kms-key-alias";
 const KEY_GEN_PATH: &str = "/app/taceo-oprf-key-gen";
 /// Same user and workdir as the OCI image (`USER 65532:65532`, `/app`).
 #[allow(
@@ -24,6 +35,13 @@ const KEY_GEN_DIR: &str = "/app";
 /// Nitro's parent instance is CID 3 (nit's heartbeat dials it too), not
 /// `VMADDR_CID_HOST` (2).
 const PARENT_CID: u32 = 3;
+const BOOTSTRAP_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// The real line is a few KiB: a ciphertext of at most 4 KiB plaintext, base64, plus STS
+/// credentials.
+const MAX_BOOTSTRAP_LINE: u64 = 64 * 1024;
+const LOG_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long the last lines get to reach the parent before the launcher exits.
+const LOG_FLUSH_WAIT: Duration = Duration::from_secs(2);
 
 impl Stream for VsockStream {
     fn try_clone(&self) -> io::Result<Self> {
@@ -36,62 +54,181 @@ impl Stream for VsockStream {
 }
 
 pub(crate) fn log(msg: &str) {
-    // Nowhere to report a failed write to the console.
+    // Nowhere to report a failed write to.
     io::stderr()
         .write_all(format!("oprf-enclave-launcher: {msg}\n").as_bytes())
         .ok();
 }
 
 pub(crate) fn run() -> ExitCode {
-    if let Err(err) = start_forwarding() {
-        log(&format!("setup failed: {err}"));
-        return ExitCode::FAILURE;
+    let (pump, logs) = match start_log_pump() {
+        Ok(started) => started,
+        Err(err) => {
+            log(&format!("log pump: {err}"));
+            return ExitCode::FAILURE;
+        }
+    };
+    // A panic has already printed its message to the pipe; returning instead of unwinding
+    // out of main lets the pump deliver it.
+    let code = match panic::catch_unwind(AssertUnwindSafe(|| boot(&logs))) {
+        Ok(Ok(code)) => code,
+        Ok(Err(err)) => {
+            log(&err);
+            ExitCode::FAILURE
+        }
+        Err(_) => ExitCode::FAILURE,
+    };
+    drop(logs);
+    flush_logs(pump);
+    code
+}
+
+fn boot(logs: &PipeWriter) -> Result<ExitCode, String> {
+    loopback_up().map_err(|e| format!("loopback: {e}"))?;
+
+    let alias_arn = std::fs::read_to_string(KMS_KEY_ALIAS_PATH)
+        .map_err(|e| format!("{KMS_KEY_ALIAS_PATH}: {e}"))?
+        .trim()
+        .to_owned();
+    let kms = Table::parse(&kms_forward_line(&alias_arn)?)?;
+    write_hosts(&kms)?;
+    for o in kms.outbound {
+        start_outbound(o)?;
     }
+
+    let bootstrap = fetch_bootstrap()?;
+    log(&format!("bootstrap received, decrypting with {alias_arn}"));
+    let plaintext = decrypt_config(&bootstrap, &alias_arn)?;
+    drop(bootstrap);
+    let config = EnclaveConfig::from_json(&plaintext)?;
+    let table = combined_table(&alias_arn, &config)?;
+    write_hosts(&table)?;
+    // outbound[0] is the KMS forward started above.
+    for o in table.outbound.into_iter().skip(1) {
+        start_outbound(o)?;
+    }
+    for i in table.inbound {
+        start_inbound(i)?;
+    }
+
+    run_key_gen(&config.environment, logs)
+}
+
+/// Starts the pump's reader before fd 2 points at the pipe: a pipe nobody drains would block
+/// the first `log()` once its buffer fills.
+fn start_log_pump() -> io::Result<(PumpHandle, PipeWriter)> {
+    let (reader, writer) = io::pipe()?;
+    let pump = spawn_pump(
+        BufReader::new(reader),
+        connect_log_sink,
+        PumpOpts {
+            queue: 1024,
+            retry: Duration::from_secs(1),
+        },
+    );
+    // SAFETY: dup2(2) on two descriptors this process owns; fd 2 is replaced atomically.
+    if unsafe { libc::dup2(writer.as_raw_fd(), libc::STDERR_FILENO) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((pump, writer))
+}
+
+/// The connect itself has no timeout argument (vsock 0.5.4), but Linux bounds a blocking
+/// vsock connect by the socket's connect timeout, 2 s by default
+/// (`VSOCK_DEFAULT_CONNECT_TIMEOUT`, `net/vmw_vsock/af_vsock.c`, v7.2 as in the EIF); a parent
+/// port without a listener answers with a reset at once. Only the pump's writer thread waits
+/// here, never its reader.
+fn connect_log_sink() -> io::Result<VsockStream> {
+    let sink = VsockStream::connect_with_cid_port(PARENT_CID, LOG_PORT)?;
+    sink.set_write_timeout(Some(LOG_WRITE_TIMEOUT))?;
+    Ok(sink)
+}
+
+/// Lets the pump deliver what is still queued, for at most [`LOG_FLUSH_WAIT`]: in production
+/// mode the parent's copy of these lines is the only diagnostic.
+fn flush_logs(pump: PumpHandle) {
+    // With key-gen gone and the launcher's writer dropped, fd 2 is the pipe's last writer;
+    // pointing it elsewhere gives the pump's reader EOF.
+    if let Ok(null) = File::options().write(true).open("/dev/null") {
+        // SAFETY: dup2(2) on two descriptors this process owns.
+        unsafe { libc::dup2(null.as_raw_fd(), libc::STDERR_FILENO) };
+    }
+    let (done_tx, done_rx) = mpsc::channel();
+    thread::spawn(move || {
+        pump.join();
+        done_tx.send(()).ok();
+    });
+    done_rx.recv_timeout(LOG_FLUSH_WAIT).ok();
+}
+
+fn fetch_bootstrap() -> Result<Bootstrap, String> {
+    let err = |e: io::Error| format!("bootstrap vsock {PARENT_CID}:{BOOTSTRAP_PORT}: {e}");
+    let stream = VsockStream::connect_with_cid_port(PARENT_CID, BOOTSTRAP_PORT).map_err(err)?;
+    stream
+        .set_read_timeout(Some(BOOTSTRAP_READ_TIMEOUT))
+        .map_err(err)?;
+    let mut line = Vec::new();
+    BufReader::new(stream.take(MAX_BOOTSTRAP_LINE + 1))
+        .read_until(b'\n', &mut line)
+        .map_err(err)?;
+    if line.len() as u64 > MAX_BOOTSTRAP_LINE {
+        return Err(format!(
+            "bootstrap line longer than {MAX_BOOTSTRAP_LINE} bytes"
+        ));
+    }
+    let line = String::from_utf8(line).map_err(|_| "bootstrap line is not UTF-8".to_owned())?;
+    Bootstrap::from_line(&line)
+}
+
+fn write_hosts(table: &Table) -> Result<(), String> {
+    std::fs::write("/etc/hosts", table.hosts()).map_err(|e| format!("/etc/hosts: {e}"))
+}
+
+fn run_key_gen(
+    environment: &BTreeMap<String, String>,
+    logs: &PipeWriter,
+) -> Result<ExitCode, String> {
+    let clone = || logs.try_clone().map_err(|e| format!("log pipe: {e}"));
     log(&format!(
         "starting {KEY_GEN_PATH} as {KEY_GEN_ID}:{KEY_GEN_ID}"
     ));
-    // The environment is the one nit read from /etc/environment. Setting the
-    // uid as root also clears supplementary groups (std calls setgroups(0)).
+    // Setting the uid as root also clears supplementary groups (std calls setgroups(0)).
     let status = Command::new(KEY_GEN_PATH)
+        .env_clear()
+        .envs(environment)
         .uid(KEY_GEN_ID)
         .gid(KEY_GEN_ID)
         .current_dir(KEY_GEN_DIR)
-        .status();
-    match status {
-        Ok(status) => {
-            log(&format!("key-gen exited: {status}"));
-            status
-                .code()
-                .and_then(|c| u8::try_from(c).ok())
-                .map_or(ExitCode::FAILURE, ExitCode::from)
-        }
-        Err(err) => {
-            log(&format!("cannot start key-gen: {err}"));
-            ExitCode::FAILURE
-        }
-    }
+        .stdout(clone()?)
+        .stderr(clone()?)
+        .status()
+        .map_err(|e| format!("cannot start key-gen: {e}"))?;
+    log(&format!("key-gen exited: {status}"));
+    Ok(status
+        .code()
+        .and_then(|c| u8::try_from(c).ok())
+        .map_or(ExitCode::FAILURE, ExitCode::from))
 }
 
-fn start_forwarding() -> io::Result<()> {
-    loopback_up()?;
-    let table = Table::parse(&std::fs::read_to_string(FORWARDS_PATH)?).map_err(io::Error::other)?;
-    std::fs::write("/etc/hosts", table.hosts())?;
-    for o in table.outbound {
-        let listener = TcpListener::bind((o.ip, o.port))?;
-        log(&format!(
-            "outbound {}:{} ({}) -> vsock {}:{}",
-            o.host, o.port, o.ip, PARENT_CID, o.vsock_port
-        ));
-        thread::spawn(move || serve_outbound(&listener, &o));
-    }
-    for i in table.inbound {
-        let listener = VsockListener::bind_with_cid_port(VMADDR_CID_ANY, i.vsock_port)?;
-        log(&format!(
-            "inbound vsock :{} -> 127.0.0.1:{}",
-            i.vsock_port, i.tcp_port
-        ));
-        thread::spawn(move || serve_inbound(&listener, &i));
-    }
+fn start_outbound(o: Outbound) -> Result<(), String> {
+    let listener = TcpListener::bind((o.ip, o.port))
+        .map_err(|e| format!("outbound {}:{}: {e}", o.host, o.port))?;
+    log(&format!(
+        "outbound {}:{} ({}) -> vsock {}:{}",
+        o.host, o.port, o.ip, PARENT_CID, o.vsock_port
+    ));
+    thread::spawn(move || serve_outbound(&listener, &o));
+    Ok(())
+}
+
+fn start_inbound(i: Inbound) -> Result<(), String> {
+    let listener = VsockListener::bind_with_cid_port(VMADDR_CID_ANY, i.vsock_port)
+        .map_err(|e| format!("inbound vsock :{}: {e}", i.vsock_port))?;
+    log(&format!(
+        "inbound vsock :{} -> 127.0.0.1:{}",
+        i.vsock_port, i.tcp_port
+    ));
+    thread::spawn(move || serve_inbound(&listener, &i));
     Ok(())
 }
 
