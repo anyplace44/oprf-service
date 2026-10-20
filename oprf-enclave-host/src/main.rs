@@ -16,7 +16,6 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
@@ -26,7 +25,7 @@ use launcher::table::Table;
 use pontifex::proxy;
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::net::TcpListener;
-use tokio::sync::Semaphore;
+use tokio::task::JoinHandle;
 use tokio_vsock::{VMADDR_CID_ANY, VsockAddr, VsockListener, VsockStream};
 
 /// Bounds dialing the enclave for an inbound connection.
@@ -61,9 +60,6 @@ struct Args {
     imds_url: String,
 }
 
-/// Concurrent log connections; only the enclave's CID gets this far.
-const MAX_LOG_CONNECTIONS: usize = 4;
-
 fn bind_vsock(port: u32) -> eyre::Result<VsockListener> {
     VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, port))
         .with_context(|| format!("binding vsock port {port}"))
@@ -84,7 +80,7 @@ async fn serve_bootstrap(
 
 /// Prints the enclave's log lines to stdout.
 async fn serve_logs(listener: VsockListener, enclave_cid: u32) -> eyre::Result<()> {
-    let slots = Arc::new(Semaphore::new(MAX_LOG_CONNECTIONS));
+    let mut current = None;
     loop {
         let (stream, peer) = listener.accept().await.context("log accept")?;
         if peer.cid() != enclave_cid {
@@ -94,17 +90,29 @@ async fn serve_logs(listener: VsockListener, enclave_cid: u32) -> eyre::Result<(
             );
             continue;
         }
-        let Ok(slot) = Arc::clone(&slots).try_acquire_owned() else {
-            continue;
-        };
-        tokio::spawn(async move {
-            let _slot = slot;
-            if let Err(err) = logsink::copy_lines(BufReader::new(stream), tokio::io::stdout()).await
-            {
-                tracing::debug!(%err, "log connection ended");
-            }
-        });
+        replace_log_copy(&mut current, stream, tokio::io::stdout());
     }
+}
+
+/// Copies `stream` to `out` in place of the connection in `current`. Only one
+/// launcher is alive at a time, so an older connection is a stale one from
+/// before a restart and would otherwise hold its task until it times out.
+fn replace_log_copy<R, W>(current: &mut Option<JoinHandle<()>>, stream: R, out: W)
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    if let Some(previous) = current.take() {
+        if !previous.is_finished() {
+            tracing::info!("new log connection replaces the previous one");
+        }
+        previous.abort();
+    }
+    *current = Some(tokio::spawn(async move {
+        if let Err(err) = logsink::copy_lines(BufReader::new(stream), out).await {
+            tracing::debug!(%err, "log connection ended");
+        }
+    }));
 }
 
 /// One pontifex proxy per outbound forward, admitting only `enclave_cid`.
@@ -285,5 +293,33 @@ mod tests {
             .expect("relay must propagate EOF")
             .expect("read");
         assert_eq!(reply, b"hello", "bytes go to the enclave and back");
+    }
+
+    #[tokio::test]
+    async fn newest_log_connection_replaces_the_previous_one() {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let mut current = None;
+            let (mut old_tx, old_rx) = tokio::io::duplex(1024);
+            let (old_out, mut old_seen) = tokio::io::duplex(1024);
+            replace_log_copy(&mut current, old_rx, old_out);
+            old_tx.write_all(b"one\n").await.expect("write");
+            let mut line = [0; 13];
+            old_seen.read_exact(&mut line).await.expect("read");
+            assert_eq!(&line, b"enclave: one\n");
+
+            let (mut new_tx, new_rx) = tokio::io::duplex(1024);
+            let (new_out, mut new_seen) = tokio::io::duplex(1024);
+            replace_log_copy(&mut current, new_rx, new_out);
+            // `old_tx` is still open: only the abort closes the old copy's output.
+            let mut rest = Vec::new();
+            old_seen.read_to_end(&mut rest).await.expect("read");
+            assert_eq!(rest, b"", "the stale copy is aborted, not drained");
+            new_tx.write_all(b"two\n").await.expect("write");
+            new_seen.read_exact(&mut line).await.expect("read");
+            assert_eq!(&line, b"enclave: two\n");
+            drop(old_tx);
+        })
+        .await
+        .expect("test deadline");
     }
 }
