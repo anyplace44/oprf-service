@@ -154,7 +154,12 @@ pub fn combined_table(alias_arn: &str, config: &EnclaveConfig) -> Result<Table, 
     let kms = kms_forward_line(alias_arn)?;
     let table = Table::parse(&format!("{kms}\n{}", config.forwards))?;
     let kms_host = kms.split_whitespace().nth(1).unwrap_or_default();
-    if table.outbound.iter().skip(1).any(|o| o.host == kms_host) {
+    if table
+        .outbound
+        .iter()
+        .skip(1)
+        .any(|o| o.host.eq_ignore_ascii_case(kms_host))
+    {
         return Err(format!("forwards must not mention the KMS host {kms_host}"));
     }
     Ok(table)
@@ -245,5 +250,17 @@ mod tests {
     fn combined_rejects_kms_host() {
         let f = "outbound kms.eu-central-1.amazonaws.com 443 8009";
         combined_table(ARN, &config(f)).unwrap_err();
+    }
+
+    #[test]
+    fn combined_rejects_kms_host_on_other_port() {
+        for host in [
+            "kms.eu-central-1.amazonaws.com",
+            "KMS.EU-CENTRAL-1.amazonaws.com",
+        ] {
+            let err =
+                combined_table(ARN, &config(&format!("outbound {host} 444 8009"))).unwrap_err();
+            assert!(err.contains("KMS host"), "{err}");
+        }
     }
 }
