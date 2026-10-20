@@ -2,8 +2,9 @@ name: Build EIF (oprf-key-gen)
 
 # Reproducible AWS Nitro Enclave image: two independent runners build the
 # `eif` target of build/Dockerfile.oprf-key-gen with no cache, the EIF and its
-# PCRs must match byte for byte. The EIF is kept as a run artifact only; it is
-# not released yet. linux/amd64 only.
+# PCRs must match byte for byte. The EIF stays a run artifact on branches and
+# PRs; on an `oprf-key-gen-v*` tag the verified EIF and its PCRs are published
+# as a GitHub release. linux/amd64 only.
 
 on:
   workflow_dispatch:
@@ -113,3 +114,50 @@ jobs:
             echo "docker buildx build --platform linux/amd64 --no-cache --build-arg GIT_HASH=${{ github.sha }} --target eif --output type=local,dest=out-eif -f build/Dockerfile.oprf-key-gen ."
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/oprf-key-gen-v')
+    needs:
+      - verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Download primary EIF
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: oprf-key-gen-eif-primary
+          path: ${{ runner.temp }}/eif
+
+      - name: Create or update release
+        shell: bash
+        run: |
+          cd "${{ runner.temp }}/eif"
+          sha=$(sha256sum oprf-key-gen.eif | cut -d' ' -f1)
+          kms=$(sed -n 's/^ARG KMS_KEY_ALIAS_ARN=//p' "$GITHUB_WORKSPACE/build/Dockerfile.oprf-key-gen")
+          [ -n "$kms" ] || { echo "::error::KMS alias ARN not found in Dockerfile" >&2; exit 1; }
+          pcr0=$(sed -n 's/^PCR0 *//p' oprf-key-gen.pcrs)
+          [ -n "$pcr0" ] || { echo "::error::PCR0 not found in oprf-key-gen.pcrs" >&2; exit 1; }
+          {
+            echo "Reproducible Nitro Enclave image of oprf-key-gen, built on two independent runners with identical EIF and PCRs."
+            echo
+            echo "- eif_sha256: \`$sha\`"
+            echo "- PCR0: \`$pcr0\`"
+            echo "- KMS alias the EIF trusts (build default): \`$kms\`"
+            echo
+            echo "The PCRs only hold for that KMS alias ARN. Full PCRs are in \`oprf-key-gen.pcrs\`."
+          } > notes.md
+          # Re-runs of the same tag replace the assets (the build is reproducible,
+          # so they are identical) instead of failing on the existing release.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" oprf-key-gen.eif oprf-key-gen.pcrs --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" oprf-key-gen.eif oprf-key-gen.pcrs \
+              --verify-tag --title "$GITHUB_REF_NAME" --notes-file notes.md
+          fi
