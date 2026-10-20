@@ -18,6 +18,7 @@ name = "oprf-enclave-launcher"
 path = "src/main.rs"
 
 [dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
 base64 = "0.23"
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
