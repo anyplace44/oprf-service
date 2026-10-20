@@ -19,9 +19,12 @@ struct Credentials {
 /// `(access_key_id, secret_access_key, session_token)` of the instance role.
 pub async fn role_credentials(base: &str) -> eyre::Result<(String, String, String)> {
     let base = base.trim_end_matches('/');
-    // Plain HTTP to a link-local address: no proxy, bounded time.
+    // Plain HTTP to a link-local address: no proxy, bounded time. No roots:
+    // the platform verifier would load the system CA store, which the scratch
+    // image does not have, and fail the build.
     let client = reqwest::Client::builder()
         .no_proxy()
+        .tls_certs_only([])
         .timeout(TIMEOUT)
         .build()
         .context("building IMDS client")?;
