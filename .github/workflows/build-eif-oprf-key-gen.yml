@@ -9,8 +9,17 @@ on:
       - 'oprf-key-gen-v*'
   pull_request:
     paths:
+      # Every input of the image: the binary's workspace crates (cargo tree
+      # -p taceo-oprf-key-gen), the lockfile, the build context and the workflows.
       - 'build/**'
       - 'oprf-enclave-launcher/**'
+      - 'artifacts/**'
+      - 'oprf-key-gen/**'
+      - 'oprf-core/**'
+      - 'oprf-types/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.dockerignore'
       - '.github/workflows/build-eif.yml'
       - '.github/workflows/build-eif-oprf-key-gen.yml'
 

@@ -9,9 +9,18 @@ on:
       - 'oprf-node-v*'
   pull_request:
     paths:
+      # Every input of the image: the binary's workspace crates (cargo tree
+      # -p taceo-oprf-node), the lockfile, the build context and the workflows.
       - 'build/**'
       - 'oprf-enclave-launcher/**'
       - 'oprf-node/**'
+      - 'oprf-service/**'
+      - 'oprf-client/**'
+      - 'oprf-core/**'
+      - 'oprf-types/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.dockerignore'
       - '.github/workflows/build-eif.yml'
       - '.github/workflows/build-eif-oprf-node.yml'
 
