@@ -4,20 +4,30 @@
 //! pontifex vsock-to-TCP proxy that only admits the enclave's CID; each
 //! `inbound` line becomes a TCP listener whose connections are relayed to the
 //! enclave over vsock.
+//!
+//! It also serves the enclave's bootstrap (KMS ciphertext and instance role
+//! credentials) and collects its logs, both from the enclave's CID only.
+
+mod bootstrap;
+mod imds;
+mod logsink;
 
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
 use eyre::Context;
+use launcher::bootstrap::{BOOTSTRAP_PORT, LOG_PORT};
 use launcher::table::Table;
 use pontifex::proxy;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::net::TcpListener;
-use tokio_vsock::{VsockAddr, VsockStream};
+use tokio::sync::Semaphore;
+use tokio_vsock::{VMADDR_CID_ANY, VsockAddr, VsockListener, VsockStream};
 
 /// Bounds dialing the enclave for an inbound connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
@@ -30,13 +40,71 @@ struct Args {
     /// target of inbound connections.
     #[arg(long, env = "OPRF_ENCLAVE_HOST_ENCLAVE_CID")]
     enclave_cid: u32,
-    /// Forward table; must be the one built into the EIF.
+    /// Forward table, provided at run time: the KMS line first, then the
+    /// forwards of the enclave's config blob.
     #[arg(
         long,
         env = "OPRF_ENCLAVE_HOST_FORWARDS",
         default_value = "/etc/enclave/forwards"
     )]
     forwards: PathBuf,
+    /// File holding the base64 KMS ciphertext of the enclave's config blob;
+    /// re-read for every bootstrap request.
+    #[arg(long, env = "OPRF_ENCLAVE_HOST_BOOTSTRAP_CIPHERTEXT")]
+    bootstrap_ciphertext: PathBuf,
+    /// Instance metadata service the role credentials are fetched from.
+    #[arg(
+        long,
+        env = "OPRF_ENCLAVE_HOST_IMDS_URL",
+        default_value = "http://169.254.169.254"
+    )]
+    imds_url: String,
+}
+
+/// Concurrent log connections; only the enclave's CID gets this far.
+const MAX_LOG_CONNECTIONS: usize = 4;
+
+fn bind_vsock(port: u32) -> eyre::Result<VsockListener> {
+    VsockListener::bind(VsockAddr::new(VMADDR_CID_ANY, port))
+        .with_context(|| format!("binding vsock port {port}"))
+}
+
+/// Answers each connection on the bootstrap port, one at a time.
+async fn serve_bootstrap(
+    listener: VsockListener,
+    enclave_cid: u32,
+    ciphertext: PathBuf,
+    imds_url: String,
+) -> eyre::Result<()> {
+    loop {
+        let (stream, peer) = listener.accept().await.context("bootstrap accept")?;
+        bootstrap::handle(peer.cid(), enclave_cid, stream, &ciphertext, &imds_url).await;
+    }
+}
+
+/// Prints the enclave's log lines to stdout.
+async fn serve_logs(listener: VsockListener, enclave_cid: u32) -> eyre::Result<()> {
+    let slots = Arc::new(Semaphore::new(MAX_LOG_CONNECTIONS));
+    loop {
+        let (stream, peer) = listener.accept().await.context("log accept")?;
+        if peer.cid() != enclave_cid {
+            tracing::warn!(
+                peer_cid = peer.cid(),
+                "log connection from foreign CID refused"
+            );
+            continue;
+        }
+        let Ok(slot) = Arc::clone(&slots).try_acquire_owned() else {
+            continue;
+        };
+        tokio::spawn(async move {
+            let _slot = slot;
+            if let Err(err) = logsink::copy_lines(BufReader::new(stream), tokio::io::stdout()).await
+            {
+                tracing::debug!(%err, "log connection ended");
+            }
+        });
+    }
 }
 
 /// One pontifex proxy per outbound forward, admitting only `enclave_cid`.
@@ -138,6 +206,13 @@ async fn main() -> eyre::Result<()> {
             match serve_inbound(listener, move || VsockStream::connect(addr)).await {}
         });
     }
+    tasks.spawn(serve_bootstrap(
+        bind_vsock(BOOTSTRAP_PORT)?,
+        args.enclave_cid,
+        args.bootstrap_ciphertext,
+        args.imds_url,
+    ));
+    tasks.spawn(serve_logs(bind_vsock(LOG_PORT)?, args.enclave_cid));
     // Every task serves forever; the first one to end failed at startup.
     match tasks.join_next().await {
         Some(result) => result.context("forwarding task panicked")?,

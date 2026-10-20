@@ -6823,10 +6823,13 @@ dependencies = [
 name = "taceo-oprf-enclave-host"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "clap",
  "eyre",
  "metrics",
  "pontifex",
+ "reqwest",
+ "serde",
  "taceo-oprf-enclave-launcher",
  "telemetry-batteries",
  "tokio",

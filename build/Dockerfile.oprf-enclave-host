@@ -11,7 +11,11 @@
 # /dev/vsock itself is not needed:
 #   docker run --security-opt seccomp=build/enclave/seccomp-vsock.json \
 #     -p 4321:4321 -e OPRF_ENCLAVE_HOST_ENCLAVE_CID=<cid> \
-#     -v <forwards>:/etc/enclave/forwards:ro <image>
+#     -e OPRF_ENCLAVE_HOST_BOOTSTRAP_CIPHERTEXT=/etc/enclave/ciphertext \
+#     -v <forwards>:/etc/enclave/forwards:ro \
+#     -v <base64 ciphertext>:/etc/enclave/ciphertext:ro <image>
+# The container reaches IMDS (OPRF_ENCLAVE_HOST_IMDS_URL) over bridge
+# networking; the instance's metadata hop limit must be at least 2.
 # Regenerate it from the default that ships with the parent's Docker version:
 #   jq '.syscalls += [{"names":["socket"],"action":"SCMP_ACT_ALLOW",
 #     "args":[{"index":0,"value":40,"op":"SCMP_CMP_EQ"}]}]' default.json
