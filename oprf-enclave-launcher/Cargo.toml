@@ -17,6 +17,11 @@ path = "src/lib.rs"
 name = "oprf-enclave-launcher"
 path = "src/main.rs"
 
+[dependencies]
+base64 = "0.23"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"
 vsock = "0.5"
