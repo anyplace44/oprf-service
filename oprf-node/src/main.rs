@@ -1,15 +1,23 @@
+//! TACEO:OPRF node binary.
+//!
+//! Runs an OPRF node with the example request authenticator (the requested
+//! `OprfKeyId` is taken from the request as-is) and the Postgres secret manager.
+//! Configured via environment variables using the `TACEO_OPRF_NODE__` prefix
+//! and `__` as separator. This is the binary of the reproducible node image
+//! (`build/Dockerfile.oprf-node`).
+
 use std::{net::SocketAddr, process::ExitCode, sync::Arc, time::Duration};
 
 use config::{Config, Environment};
 use eyre::Context;
 use nodes_common::postgres::PostgresConfig;
 use oprf_client::Connector;
-use serde::Deserialize;
-use taceo_oprf_service::{
+use oprf_service::{
     OprfServiceBuilder, StartedServices,
     config::OprfNodeServiceConfig,
     secret_manager::{SecretManagerService, postgres::PostgresSecretManager},
 };
+use serde::Deserialize;
 use url::Url;
 
 use crate::simple_authenticator::ExampleOprfRequestAuthenticator;
