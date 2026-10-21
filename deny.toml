@@ -76,6 +76,7 @@ ignore = [
     { id = "RUSTSEC-2023-0089", reason = "need to wait until circom-witness-rs updates deps" },
     { id = "RUSTSEC-2026-0173", reason = "need to wait until alloy removes. Not relevant as only error reporting" },
     { id = "RUSTSEC-2021-0127", reason = "serde_cbor is unmaintained; every aws-nitro-enclaves-nsm-api release (latest 0.5.2) depends on it. Only the enclave launcher uses it, for NSM driver messages." },
+    { id = "RUSTSEC-2026-0374", reason = "basic-toml is unmaintained with no safe upgrade; only askama_derive (askama config feature, via taceo-oprf-test) pulls it in, at build time for the test transcript generator." },
 ]
 # If this is true, then cargo deny will use the git executable to fetch advisory database.
 # If this is false, then it uses a built-in git library.
