@@ -191,6 +191,7 @@ jobs:
           artifact-name: ${{ inputs.image-name }}-amd64-sbom.spdx.json
           output-file: ${{ runner.temp }}/amd64-sbom.spdx.json
           upload-artifact: true
+          upload-release-assets: false
 
       - name: Run vulnerability scan
         uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
