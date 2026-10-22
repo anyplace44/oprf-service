@@ -1,22 +1,25 @@
-//! Parent-side counterpart of `oprf-enclave-launcher`.
+//! Parent-side counterpart of `oprf-enclave-launcher`, serving every enclave of a parent.
 //!
-//! Reads a forward table provided at run time: the KMS line first, then the
-//! forwards of the enclave's config blob. Each `outbound` line becomes a
-//! pontifex vsock-to-TCP proxy that only admits the enclave's CID; each
-//! `inbound` line becomes a TCP listener whose connections are relayed to the
-//! enclave over vsock.
+//! Reads a JSON config naming each enclave (name, CID, KMS key and ports, ciphertext file,
+//! forward table). Each `outbound` line becomes a pontifex vsock-to-TCP proxy that only admits
+//! its enclave's CID; each `inbound` line becomes a TCP listener whose connections are relayed to
+//! that enclave over vsock.
 //!
-//! It also serves the enclave's bootstrap (KMS ciphertext and instance role
-//! credentials) and collects its logs, both from the enclave's CID only.
+//! It also serves the bootstrap (KMS ciphertext, key ARN and instance role credentials) and
+//! collects the logs of all enclaves on the shared ports 7001 and 7002, telling them apart by
+//! the peer's CID; a peer that is not a configured enclave gets nothing.
 
 mod bootstrap;
+mod config;
 mod imds;
 mod logsink;
 
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
@@ -29,6 +32,8 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_vsock::{VMADDR_CID_ANY, VsockAddr, VsockListener, VsockStream};
 
+use crate::config::HostConfig;
+
 /// Bounds dialing the enclave for an inbound connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
 const METRICS_OUTBOUND: &str = "taceo.oprf.enclave_host.outbound";
@@ -36,36 +41,13 @@ const METRICS_INBOUND: &str = "taceo.oprf.enclave_host.inbound";
 
 #[derive(Parser)]
 struct Args {
-    /// CID of the enclave: the only peer the outbound proxies admit, and the
-    /// target of inbound connections.
-    #[arg(long, env = "OPRF_ENCLAVE_HOST_ENCLAVE_CID")]
-    enclave_cid: u32,
-    /// Forward table, provided at run time: the KMS line first, then the
-    /// forwards of the enclave's config blob.
+    /// JSON file naming the enclaves this parent serves; see `config.rs`.
     #[arg(
         long,
-        env = "OPRF_ENCLAVE_HOST_FORWARDS",
-        default_value = "/etc/enclave/forwards"
+        env = "OPRF_ENCLAVE_HOST_CONFIG",
+        default_value = "/etc/oprf-enclave-host/config.json"
     )]
-    forwards: PathBuf,
-    /// File holding the base64 KMS ciphertext of the enclave's config blob;
-    /// re-read for every bootstrap request.
-    #[arg(long, env = "OPRF_ENCLAVE_HOST_BOOTSTRAP_CIPHERTEXT")]
-    bootstrap_ciphertext: PathBuf,
-    /// Instance metadata service the role credentials are fetched from.
-    #[arg(
-        long,
-        env = "OPRF_ENCLAVE_HOST_IMDS_URL",
-        default_value = "http://169.254.169.254"
-    )]
-    imds_url: String,
-    /// KMS key ARN sent to the enclave in the bootstrap message.
-    #[arg(long, env = "OPRF_ENCLAVE_HOST_KMS_KEY_ARN")]
-    kms_key_arn: String,
-    /// Parent vsock port of the KMS forward, sent to the enclave in the
-    /// bootstrap message; must match the KMS line of the forward table.
-    #[arg(long, env = "OPRF_ENCLAVE_HOST_KMS_VSOCK_PORT")]
-    kms_vsock_port: u32,
+    config: PathBuf,
 }
 
 fn bind_vsock(port: u32) -> eyre::Result<VsockListener> {
@@ -74,52 +56,67 @@ fn bind_vsock(port: u32) -> eyre::Result<VsockListener> {
 }
 
 /// Answers each connection on the bootstrap port, one at a time.
-async fn serve_bootstrap(
-    listener: VsockListener,
-    enclave_cid: u32,
-    source: bootstrap::Source,
-) -> eyre::Result<()> {
+async fn serve_bootstrap(listener: VsockListener, config: Arc<HostConfig>) -> eyre::Result<()> {
     loop {
         let (stream, peer) = listener.accept().await.context("bootstrap accept")?;
-        bootstrap::handle(peer.cid(), enclave_cid, stream, &source).await;
+        bootstrap::handle(peer.cid(), stream, &config).await;
     }
 }
 
-/// Prints the enclave's log lines to stdout.
-async fn serve_logs(listener: VsockListener, enclave_cid: u32) -> eyre::Result<()> {
-    let mut current = None;
+/// Prints the enclaves' log lines to stdout.
+async fn serve_logs(listener: VsockListener, config: Arc<HostConfig>) -> eyre::Result<()> {
+    let mut current = HashMap::new();
     loop {
         let (stream, peer) = listener.accept().await.context("log accept")?;
-        if peer.cid() != enclave_cid {
+        let Some(enclave) = config.by_cid(peer.cid()) else {
             tracing::warn!(
                 peer_cid = peer.cid(),
                 "log connection from foreign CID refused"
             );
             continue;
-        }
-        replace_log_copy(&mut current, stream, tokio::io::stdout());
+        };
+        replace_log_copy(
+            &mut current,
+            enclave.cid,
+            &enclave.name,
+            stream,
+            tokio::io::stdout(),
+        );
     }
 }
 
-/// Copies `stream` to `out` in place of the connection in `current`. Only one
-/// launcher is alive at a time, so an older connection is a stale one from
-/// before a restart and would otherwise hold its task until it times out.
-fn replace_log_copy<R, W>(current: &mut Option<JoinHandle<()>>, stream: R, out: W)
-where
+/// Copies `stream` to `out` in place of the connection of the same enclave in `current`. Only
+/// one launcher per enclave is alive at a time, so an older connection is a stale one from before
+/// a restart and would otherwise hold its task until it times out. Other enclaves' copies are
+/// left alone.
+fn replace_log_copy<R, W>(
+    current: &mut HashMap<u32, JoinHandle<()>>,
+    cid: u32,
+    name: &str,
+    stream: R,
+    out: W,
+) where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    if let Some(previous) = current.take() {
+    if let Some(previous) = current.remove(&cid) {
         if !previous.is_finished() {
-            tracing::info!("new log connection replaces the previous one");
+            tracing::info!(
+                enclave = name,
+                "new log connection replaces the previous one"
+            );
         }
         previous.abort();
     }
-    *current = Some(tokio::spawn(async move {
-        if let Err(err) = logsink::copy_lines(BufReader::new(stream), out).await {
-            tracing::debug!(%err, "log connection ended");
-        }
-    }));
+    let name = name.to_owned();
+    current.insert(
+        cid,
+        tokio::spawn(async move {
+            if let Err(err) = logsink::copy_lines(BufReader::new(stream), out, &name).await {
+                tracing::debug!(enclave = name, %err, "log connection ended");
+            }
+        }),
+    );
 }
 
 /// One pontifex proxy per outbound forward, admitting only `enclave_cid`.
@@ -198,44 +195,39 @@ where
 async fn main() -> eyre::Result<()> {
     let _guard = telemetry_batteries::init()?;
     let args = Args::parse();
-    let forwards = std::fs::read_to_string(&args.forwards)
-        .with_context(|| format!("reading {}", args.forwards.display()))?;
-    let table = Table::parse(&forwards).map_err(eyre::Report::msg)?;
+    let config = Arc::new(HostConfig::load(&args.config)?);
 
     let mut tasks = tokio::task::JoinSet::new();
-    for config in proxy_configs(&table, args.enclave_cid) {
-        let port = config.port;
-        tracing::info!(port, host = %config.destination_host, dest_port = config.destination_port, "outbound proxy");
-        tasks.spawn(async move {
-            let Err(err) = proxy::serve(config, move |event| record_outbound(port, event)).await;
-            eyre::Result::<()>::Err(err.into())
-        });
-    }
-    for i in &table.inbound {
-        let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, i.tcp_port))
-            .await
-            .with_context(|| format!("binding inbound port {}", i.tcp_port))?;
-        let addr = VsockAddr::new(args.enclave_cid, i.vsock_port);
-        tracing::info!(port = i.tcp_port, %addr, "inbound relay");
-        tasks.spawn(async move {
-            match serve_inbound(listener, move || VsockStream::connect(addr)).await {}
-        });
+    for enclave in &config.enclaves {
+        for proxy_config in proxy_configs(&enclave.table, enclave.cid) {
+            let port = proxy_config.port;
+            tracing::info!(enclave = %enclave.name, port, host = %proxy_config.destination_host, dest_port = proxy_config.destination_port, "outbound proxy");
+            tasks.spawn(async move {
+                let Err(err) =
+                    proxy::serve(proxy_config, move |event| record_outbound(port, event)).await;
+                eyre::Result::<()>::Err(err.into())
+            });
+        }
+        for i in &enclave.table.inbound {
+            let listener = TcpListener::bind((Ipv4Addr::UNSPECIFIED, i.tcp_port))
+                .await
+                .with_context(|| format!("binding inbound port {}", i.tcp_port))?;
+            let addr = VsockAddr::new(enclave.cid, i.vsock_port);
+            tracing::info!(enclave = %enclave.name, port = i.tcp_port, %addr, "inbound relay");
+            tasks.spawn(async move {
+                match serve_inbound(listener, move || VsockStream::connect(addr)).await {}
+            });
+        }
     }
     tasks.spawn(serve_bootstrap(
         bind_vsock(BOOTSTRAP_PORT)?,
-        args.enclave_cid,
-        bootstrap::Source {
-            ciphertext: args.bootstrap_ciphertext,
-            imds_url: args.imds_url,
-            kms_key_arn: args.kms_key_arn,
-            kms_vsock_port: args.kms_vsock_port,
-        },
+        Arc::clone(&config),
     ));
-    tasks.spawn(serve_logs(bind_vsock(LOG_PORT)?, args.enclave_cid));
+    tasks.spawn(serve_logs(bind_vsock(LOG_PORT)?, config));
     // Every task serves forever; the first one to end failed at startup.
     match tasks.join_next().await {
         Some(result) => result.context("forwarding task panicked")?,
-        None => eyre::bail!("forward table has no entries"),
+        None => eyre::bail!("no tasks to run"),
     }
 }
 
@@ -307,27 +299,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn newest_log_connection_replaces_the_previous_one() {
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let mut current = None;
-            let (mut old_tx, old_rx) = tokio::io::duplex(1024);
-            let (old_out, mut old_seen) = tokio::io::duplex(1024);
-            replace_log_copy(&mut current, old_rx, old_out);
+    async fn log_replacement_is_per_cid() {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut current = HashMap::new();
+            let conn = |cid, name: &str, current: &mut _| {
+                let (tx, rx) = tokio::io::duplex(1024);
+                let (out, seen) = tokio::io::duplex(1024);
+                replace_log_copy(current, cid, name, rx, out);
+                (tx, seen)
+            };
+            let (mut kg_tx, mut kg_seen) = conn(16, "key-gen", &mut current);
+            let (mut old_tx, mut old_seen) = conn(17, "node", &mut current);
             old_tx.write_all(b"one\n").await.expect("write");
-            let mut line = [0; 13];
+            let mut line = [0; 18];
             old_seen.read_exact(&mut line).await.expect("read");
-            assert_eq!(&line, b"enclave: one\n");
+            assert_eq!(&line, b"enclave node: one\n");
 
-            let (mut new_tx, new_rx) = tokio::io::duplex(1024);
-            let (new_out, mut new_seen) = tokio::io::duplex(1024);
-            replace_log_copy(&mut current, new_rx, new_out);
+            let (mut new_tx, mut new_seen) = conn(17, "node", &mut current);
             // `old_tx` is still open: only the abort closes the old copy's output.
             let mut rest = Vec::new();
             old_seen.read_to_end(&mut rest).await.expect("read");
             assert_eq!(rest, b"", "the stale copy is aborted, not drained");
             new_tx.write_all(b"two\n").await.expect("write");
+            let mut line = [0; 18];
             new_seen.read_exact(&mut line).await.expect("read");
-            assert_eq!(&line, b"enclave: two\n");
+            assert_eq!(&line, b"enclave node: two\n");
+
+            // CID 16's copy survived CID 17's replacement.
+            kg_tx.write_all(b"kg\n").await.expect("write");
+            let mut line = [0; 20];
+            kg_seen.read_exact(&mut line).await.expect("read");
+            assert_eq!(&line, b"enclave key-gen: kg\n");
             drop(old_tx);
         })
         .await

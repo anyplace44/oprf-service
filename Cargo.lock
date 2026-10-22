@@ -6997,6 +6997,7 @@ dependencies = [
  "pontifex",
  "reqwest",
  "serde",
+ "serde_json",
  "taceo-oprf-enclave-launcher",
  "telemetry-batteries",
  "tokio",
