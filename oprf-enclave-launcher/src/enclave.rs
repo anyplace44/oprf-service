@@ -1,4 +1,4 @@
-//! Enclave-side runtime: log pump, KMS-delivered config, forwarders, key-gen.
+//! Enclave-side runtime: log pump, KMS-delivered config, forwarders, the enclave app.
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -14,24 +14,22 @@ use std::time::Duration;
 
 use vsock::{VMADDR_CID_ANY, VsockListener, VsockStream};
 
+use crate::app;
 use crate::kms::decrypt_config;
 use crate::logpump::{PumpHandle, PumpOpts, spawn_pump};
 use crate::relay::{Stream, relay};
 use taceo_oprf_enclave_launcher::bootstrap::{
-    BOOTSTRAP_PORT, Bootstrap, EnclaveConfig, LOG_PORT, combined_table, kms_forward_line,
+    BOOTSTRAP_PORT, Bootstrap, EnclaveConfig, LOG_PORT, check_key, combined_table, kms_forward_line,
 };
 use taceo_oprf_enclave_launcher::table::{Inbound, Outbound, Table};
 
-/// Baked into the EIF (build arg `KMS_KEY_ALIAS_ARN`), so measured into PCR2.
-const KMS_KEY_ALIAS_PATH: &str = "/etc/enclave/kms-key-alias";
-const KEY_GEN_PATH: &str = "/app/taceo-oprf-key-gen";
-/// Same user and workdir as the OCI image (`USER 65532:65532`, `/app`).
+/// Same user and workdir as the OCI images (`USER 65532:65532`, `/app`).
 #[allow(
     clippy::decimal_literal_representation,
-    reason = "must read the same as USER 65532:65532 in the Dockerfile"
+    reason = "must read the same as USER 65532:65532 in the Dockerfiles"
 )]
-const KEY_GEN_ID: u32 = 65532;
-const KEY_GEN_DIR: &str = "/app";
+const APP_ID: u32 = 65532;
+const APP_DIR: &str = "/app";
 /// Nitro's parent instance is CID 3 (nit's heartbeat dials it too), not
 /// `VMADDR_CID_HOST` (2).
 const PARENT_CID: u32 = 3;
@@ -86,25 +84,30 @@ pub(crate) fn run() -> ExitCode {
 fn boot(logs: &PipeWriter) -> Result<ExitCode, String> {
     loopback_up().map_err(|e| format!("loopback: {e}"))?;
 
-    let alias_arn = std::fs::read_to_string(KMS_KEY_ALIAS_PATH)
-        .map_err(|e| format!("{KMS_KEY_ALIAS_PATH}: {e}"))?
-        .trim()
-        .to_owned();
-    let kms = Table::parse(&kms_forward_line(&alias_arn)?)?;
+    let bootstrap = fetch_bootstrap()?;
+    let key_arn = bootstrap.kms_key_arn.clone();
+    let kms_port = bootstrap.kms_vsock_port;
+    let kms_line = kms_forward_line(&key_arn, kms_port)?;
+    let kms = Table::parse(&kms_line)?;
     write_hosts(&kms)?;
     for o in kms.outbound {
         start_outbound(o)?;
     }
 
-    let bootstrap = fetch_bootstrap()?;
-    log(&format!("bootstrap received, decrypting with {alias_arn}"));
-    let plaintext = decrypt_config(&bootstrap, &alias_arn)?;
+    log(&format!(
+        "bootstrap received, decrypting with {key_arn} via vsock port {kms_port}"
+    ));
+    let plaintext = decrypt_config(&bootstrap, &key_arn)?;
     drop(bootstrap);
     let config = EnclaveConfig::from_json(&plaintext)?;
-    let table = combined_table(&alias_arn, &config)?;
+    drop(plaintext);
+    // Before any of the blob's forwards or the app start.
+    check_key(&key_arn, &config)?;
+    let table = combined_table(&kms_line, &config.public.forwards, kms_port)?;
     log(&format!(
-        "config decrypted: {} environment keys, {} forwards",
-        config.environment.len(),
+        "config decrypted: {} public and {} secret environment keys, {} forwards",
+        config.public.environment.len(),
+        config.secret_environment.len(),
         table.outbound.len() - 1 + table.inbound.len()
     ));
     write_hosts(&table)?;
@@ -115,8 +118,9 @@ fn boot(logs: &PipeWriter) -> Result<ExitCode, String> {
     for i in table.inbound {
         start_inbound(i)?;
     }
+    log(&config.hash_line());
 
-    run_key_gen(&config.environment, logs)
+    run_app(&app::path()?, &config.app_environment(), logs)
 }
 
 /// Starts the pump's reader before fd 2 points at the pipe: a pipe nobody drains would block
@@ -152,7 +156,7 @@ fn connect_log_sink() -> io::Result<VsockStream> {
 /// Lets the pump deliver what is still queued, for at most [`LOG_FLUSH_WAIT`]: in production
 /// mode the parent's copy of these lines is the only diagnostic.
 fn flush_logs(pump: PumpHandle) {
-    // With key-gen gone and the launcher's writer dropped, fd 2 is the pipe's last writer;
+    // With the app gone and the launcher's writer dropped, fd 2 is the pipe's last writer;
     // pointing it elsewhere gives the pump's reader EOF.
     if let Ok(null) = File::options().write(true).open("/dev/null") {
         // SAFETY: dup2(2) on two descriptors this process owns.
@@ -189,26 +193,25 @@ fn write_hosts(table: &Table) -> Result<(), String> {
     std::fs::write("/etc/hosts", table.hosts()).map_err(|e| format!("/etc/hosts: {e}"))
 }
 
-fn run_key_gen(
+fn run_app(
+    app: &str,
     environment: &BTreeMap<String, String>,
     logs: &PipeWriter,
 ) -> Result<ExitCode, String> {
     let clone = || logs.try_clone().map_err(|e| format!("log pipe: {e}"));
-    log(&format!(
-        "starting {KEY_GEN_PATH} as {KEY_GEN_ID}:{KEY_GEN_ID}"
-    ));
+    log(&format!("starting {app} as {APP_ID}:{APP_ID}"));
     // Setting the uid as root also clears supplementary groups (std calls setgroups(0)).
-    let status = Command::new(KEY_GEN_PATH)
+    let status = Command::new(app)
         .env_clear()
         .envs(environment)
-        .uid(KEY_GEN_ID)
-        .gid(KEY_GEN_ID)
-        .current_dir(KEY_GEN_DIR)
+        .uid(APP_ID)
+        .gid(APP_ID)
+        .current_dir(APP_DIR)
         .stdout(clone()?)
         .stderr(clone()?)
         .status()
-        .map_err(|e| format!("cannot start key-gen: {e}"))?;
-    log(&format!("key-gen exited: {status}"));
+        .map_err(|e| format!("cannot start {app}: {e}"))?;
+    log(&format!("{app} exited: {status}"));
     Ok(status
         .code()
         .and_then(|c| u8::try_from(c).ok())

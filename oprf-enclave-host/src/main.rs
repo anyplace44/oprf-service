@@ -59,6 +59,13 @@ struct Args {
         default_value = "http://169.254.169.254"
     )]
     imds_url: String,
+    /// KMS key ARN sent to the enclave in the bootstrap message.
+    #[arg(long, env = "OPRF_ENCLAVE_HOST_KMS_KEY_ARN")]
+    kms_key_arn: String,
+    /// Parent vsock port of the KMS forward, sent to the enclave in the
+    /// bootstrap message; must match the KMS line of the forward table.
+    #[arg(long, env = "OPRF_ENCLAVE_HOST_KMS_VSOCK_PORT")]
+    kms_vsock_port: u32,
 }
 
 fn bind_vsock(port: u32) -> eyre::Result<VsockListener> {
@@ -70,12 +77,11 @@ fn bind_vsock(port: u32) -> eyre::Result<VsockListener> {
 async fn serve_bootstrap(
     listener: VsockListener,
     enclave_cid: u32,
-    ciphertext: PathBuf,
-    imds_url: String,
+    source: bootstrap::Source,
 ) -> eyre::Result<()> {
     loop {
         let (stream, peer) = listener.accept().await.context("bootstrap accept")?;
-        bootstrap::handle(peer.cid(), enclave_cid, stream, &ciphertext, &imds_url).await;
+        bootstrap::handle(peer.cid(), enclave_cid, stream, &source).await;
     }
 }
 
@@ -218,8 +224,12 @@ async fn main() -> eyre::Result<()> {
     tasks.spawn(serve_bootstrap(
         bind_vsock(BOOTSTRAP_PORT)?,
         args.enclave_cid,
-        args.bootstrap_ciphertext,
-        args.imds_url,
+        bootstrap::Source {
+            ciphertext: args.bootstrap_ciphertext,
+            imds_url: args.imds_url,
+            kms_key_arn: args.kms_key_arn,
+            kms_vsock_port: args.kms_vsock_port,
+        },
     ));
     tasks.spawn(serve_logs(bind_vsock(LOG_PORT)?, args.enclave_cid));
     // Every task serves forever; the first one to end failed at startup.
