@@ -1,20 +1,20 @@
-# Parent-side proxy for the oprf-key-gen Nitro Enclave (oprf-enclave-host),
-# built like build/Dockerfile.oprf-key-gen: StageX, digest-pinned, offline
-# after `cargo fetch`. The image is not measured into the enclave's PCRs and
-# carries no forward table: the table is supplied at run time through
-# OPRF_ENCLAVE_HOST_FORWARDS (default /etc/enclave/forwards).
+# Parent-side proxy for the oprf-key-gen and oprf-node Nitro Enclaves
+# (oprf-enclave-host), built like build/Dockerfile.oprf-key-gen: StageX,
+# digest-pinned, offline after `cargo fetch`. The image is not measured into
+# the enclaves' PCRs and carries no configuration: a JSON file naming each
+# enclave (CID, KMS key ARN and vsock port, ciphertext file, forward table) is
+# supplied at run time through OPRF_ENCLAVE_HOST_CONFIG (default
+# /etc/oprf-enclave-host/config.json); its paths are as seen in the container.
 #
 # Run on the parent instance. Docker's default seccomp profile rejects
 # AF_VSOCK sockets (bind fails with EPERM); build/enclave/seccomp-vsock.json is
 # that default as shipped with Docker 25.0.14 (Amazon Linux 2023; moby
 # v25.0.14 profiles/seccomp/default.json) plus one rule allowing AF_VSOCK.
-# /dev/vsock itself is not needed:
+# /dev/vsock itself is not needed. Publish each enclave's inbound TCP ports:
 #   docker run --security-opt seccomp=build/enclave/seccomp-vsock.json \
-#     -p 4321:4321 -e OPRF_ENCLAVE_HOST_ENCLAVE_CID=<cid> \
-#     -e OPRF_ENCLAVE_HOST_BOOTSTRAP_CIPHERTEXT=/etc/enclave/ciphertext \
-#     -v <forwards>:/etc/enclave/forwards:ro \
-#     -v <base64 ciphertext>:/etc/enclave/ciphertext:ro <image>
-# The container reaches IMDS (OPRF_ENCLAVE_HOST_IMDS_URL) over bridge
+#     -p 4321:4321 -p 10000:10000 \
+#     -v /etc/oprf-enclave-host:/etc/oprf-enclave-host:ro <image>
+# The container reaches IMDS (`imds_url` in the config) over bridge
 # networking; the instance's metadata hop limit must be at least 2.
 # Regenerate it from the default that ships with the parent's Docker version:
 #   jq '.syscalls += [{"names":["socket"],"action":"SCMP_ACT_ALLOW",
@@ -43,7 +43,7 @@ ARG GIT_HASH
 LABEL org.opencontainers.image.revision=$GIT_HASH
 LABEL org.opencontainers.image.vendor=TACEO
 LABEL org.opencontainers.image.source=https://github.com/anyplace44/oprf-service
-LABEL org.opencontainers.image.description="OPRF key-gen enclave host proxy"
+LABEL org.opencontainers.image.description="OPRF Nitro enclave host proxy"
 USER 65532:65532
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/reproducible/oprf-enclave-host /oprf-enclave-host
 
