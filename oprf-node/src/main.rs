@@ -1,6 +1,6 @@
 //! TACEO:OPRF node binary.
 //!
-//! Runs an OPRF node with the example request authenticator (the requested
+//! Runs an OPRF node with the simple request authenticator (the requested
 //! `OprfKeyId` is taken from the request as-is) and the Postgres secret manager.
 //! Configured via environment variables using the `TACEO_OPRF_NODE__` prefix
 //! and `__` as separator. This is the binary of the reproducible node image
@@ -25,8 +25,8 @@ use crate::{simple_authenticator::ExampleOprfRequestAuthenticator, tls::NodeTlsC
 mod simple_authenticator;
 mod tls;
 
-/// The top-level configuration for the OPRF node example binary.
-/// Loads the example service configuration from environment variables.
+/// The top-level configuration for the OPRF node binary.
+/// Loads the node configuration from environment variables.
 /// Configured via environment variables using the `TACEO_OPRF_NODE__` prefix and `__` as separator.
 #[derive(Clone, Debug, Deserialize)]
 #[non_exhaustive]
@@ -128,7 +128,7 @@ async fn main() -> eyre::Result<ExitCode> {
     }
 }
 
-/// Starts the example OPRF service and waits for it to shut down.
+/// Starts the OPRF node and waits for it to shut down.
 ///
 /// # Errors
 ///
