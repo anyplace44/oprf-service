@@ -20,9 +20,10 @@ use std::{
     time::Duration,
 };
 
+use alloy::primitives::U160;
 use ark_ff::UniformRand as _;
 use oprf_core::oprf::BlindingFactor;
-use oprf_types::api::OprfRequest;
+use oprf_types::{OprfKeyId, ShareEpoch, api::OprfRequest};
 use rand::SeedableRng as _;
 use rcgen::generate_simple_self_signed;
 use rustls::{ServerConfig, crypto::aws_lc_rs};
@@ -167,6 +168,11 @@ async fn health_check_uses_pinned_client() {
     .await
     .unwrap_err();
     assert!(err.to_string().contains("not healthy"), "{err}");
+    assert!(
+        err.to_string()
+            .contains("does not match any pinned certificate"),
+        "{err}"
+    );
     assert_eq!(server.served(), before, "wrong pin completed a handshake");
 }
 
@@ -287,4 +293,46 @@ async fn delegate_request_uses_pinned_client() {
         "{chain}"
     );
     assert_eq!(server.served(), 1, "wrong pin completed a handshake");
+}
+
+#[tokio::test]
+async fn public_key_fetch_uses_pinned_client() {
+    let server = TlsServer::spawn(http_ok).await;
+    let (_, _, wrong_pem) = self_signed();
+    let key_id = OprfKeyId::new(U160::from(1u32));
+
+    // right pin: the request reaches the server (whose body is no valid public key), so the
+    // fetch keeps retrying until its deadline without a certificate error
+    let right =
+        oprf_client::tls::http_client(&tls_config_from_file("pk-right", &server.pin_pem)).unwrap();
+    let err = deadline(health_checks::oprf_public_key_from_services(
+        &right,
+        key_id,
+        ShareEpoch::default(),
+        &[server.url()],
+        Duration::from_secs(2),
+    ))
+    .await
+    .unwrap_err();
+    assert!(server.served() >= 1);
+    assert!(!err.to_string().contains("certificate"), "{err}");
+
+    let before = server.served();
+    let wrong =
+        oprf_client::tls::http_client(&tls_config_from_file("pk-wrong", &wrong_pem)).unwrap();
+    let err = deadline(health_checks::oprf_public_key_from_services(
+        &wrong,
+        key_id,
+        ShareEpoch::default(),
+        &[server.url()],
+        Duration::from_secs(2),
+    ))
+    .await
+    .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("does not match any pinned certificate"),
+        "{err}"
+    );
+    assert_eq!(server.served(), before, "wrong pin completed a handshake");
 }

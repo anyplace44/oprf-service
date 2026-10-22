@@ -60,4 +60,3 @@ telemetry-batteries.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net"] }
 tokio-rustls = { workspace = true }
 tokio-tungstenite = { workspace = true }
-uuid = { workspace = true }
