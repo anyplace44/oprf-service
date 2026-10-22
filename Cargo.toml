@@ -8,6 +8,7 @@ members = [
   "oprf-enclave-host",
   "oprf-enclave-launcher",
   "oprf-key-gen",
+  "oprf-node",
   "oprf-service",
   "oprf-test",
   "oprf-types",

@@ -1,15 +1,23 @@
+//! TACEO:OPRF node binary.
+//!
+//! Runs an OPRF node with the example request authenticator (the requested
+//! `OprfKeyId` is taken from the request as-is) and the Postgres secret manager.
+//! Configured via environment variables using the `TACEO_OPRF_NODE__` prefix
+//! and `__` as separator. This is the binary of the reproducible node image
+//! (`build/Dockerfile.oprf-node`).
+
 use std::{net::SocketAddr, process::ExitCode, sync::Arc, time::Duration};
 
 use config::{Config, Environment};
 use eyre::Context;
 use nodes_common::postgres::PostgresConfig;
 use oprf_client::Connector;
-use serde::Deserialize;
-use taceo_oprf_service::{
+use oprf_service::{
     OprfServiceBuilder, StartedServices,
     config::OprfNodeServiceConfig,
     secret_manager::{SecretManagerService, postgres::PostgresSecretManager},
 };
+use serde::Deserialize;
 use url::Url;
 
 use crate::simple_authenticator::ExampleOprfRequestAuthenticator;
@@ -21,7 +29,7 @@ mod simple_authenticator;
 /// Configured via environment variables using the `TACEO_OPRF_NODE__` prefix and `__` as separator.
 #[derive(Clone, Debug, Deserialize)]
 #[non_exhaustive]
-pub struct ExampleOprfNodeConfig {
+pub struct OprfNodeConfig {
     /// The bind addr of the AXUM server
     #[serde(default = "default_bind_addr")]
     pub bind_addr: SocketAddr,
@@ -55,7 +63,7 @@ fn default_max_wait_shutdown() -> Duration {
 /// # Errors
 ///
 /// Returns an error if the environment configuration cannot be built or parsed.
-pub fn load_example_config() -> eyre::Result<ExampleOprfNodeConfig> {
+pub fn load_example_config() -> eyre::Result<OprfNodeConfig> {
     let cfg = Config::builder().add_source(
         Environment::with_prefix("TACEO_OPRF_NODE")
             .separator("__")
@@ -114,7 +122,7 @@ async fn main() -> eyre::Result<ExitCode> {
 ///
 /// Returns an error if service initialization, networking, or shutdown fails.
 pub async fn start_service(
-    config: ExampleOprfNodeConfig,
+    config: OprfNodeConfig,
     secret_manager: SecretManagerService,
     shutdown_signal: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> eyre::Result<()> {

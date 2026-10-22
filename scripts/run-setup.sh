@@ -17,7 +17,7 @@ run_deploy() {
     deploy_key_registry
 
     cargo clean --workspace
-    cargo build --release --example taceo-oprf-service-example
+    cargo build --release --bin taceo-oprf-node
     cargo build --release --example dev-client-example
     build_keygen_binary
 
