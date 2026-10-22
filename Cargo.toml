@@ -35,6 +35,7 @@ ark-serialize = "0.6"
 async-trait = "0.1"
 axum = "0.8"
 axum-extra = "0.12"
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 axum-test = "20"
 backon = { version = "1.6", default-features = false }
 blake3 = "1"
