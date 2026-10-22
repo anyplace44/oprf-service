@@ -59,10 +59,12 @@ impl DevClient for ExampleDevClient {
         &self,
         config: &DevClientConfig,
         provider: DynProvider,
+        client: &reqwest::Client,
     ) -> eyre::Result<Self::Setup> {
         let (oprf_key_id, oprf_public_key) = if let Some(oprf_key_id) = self.oprf_key_id {
             let oprf_key_id = OprfKeyId::new(oprf_key_id);
             let oprf_public_key = health_checks::oprf_public_key_from_services(
+                client,
                 oprf_key_id,
                 None,
                 &config.nodes,
@@ -72,6 +74,7 @@ impl DevClient for ExampleDevClient {
             (oprf_key_id, oprf_public_key)
         } else {
             let (oprf_key_id, oprf_public_key) = taceo_oprf_dev_client::init_key_gen(
+                client,
                 &config.nodes,
                 config.oprf_key_registry_contract,
                 provider,
