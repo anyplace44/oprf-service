@@ -19,8 +19,8 @@
 #     -f build/Dockerfile.oprf-key-gen .
 #
 # Build the AWS Nitro Enclave image (EIF) and its PCRs from the same rootfs.
-# The EIF carries no environment: it trusts the KMS key behind
-# KMS_KEY_ALIAS_ARN (default taceo-dev's) and receives its config at boot.
+# The EIF carries no deployment value (no account, region or key name): the
+# KMS key ARN and the config arrive from the parent at boot.
 #   docker buildx build --platform linux/amd64 --no-cache \
 #     --build-arg GIT_HASH=$(git rev-parse HEAD) --target eif \
 #     --output type=local,dest=out-eif -f build/Dockerfile.oprf-key-gen .
@@ -127,14 +127,13 @@ COPY --from=core-ca-certificates /etc/ssl/certs/ca-certificates.crt /etc/ssl/cer
 # pins the EIF build time to 0, so EIF and PCRs are a function of the commit.
 # nit execs nit.target (oprf-enclave-launcher) as root with an empty argv,
 # cwd / and an empty environment (there is no /etc/environment). The
-# launcher fetches the KMS-encrypted config from the parent, decrypts it
-# with an attestation under the alias ARN in /etc/enclave/kms-key-alias, and
-# runs key-gen with exactly the config's environment and forwards. The
-# image's USER/WORKDIR do not apply. The ARN and the RDS CA bundle
-# (/etc/enclave/rds-ca.pem, pinned by sha256; AWS updates it, so a checksum
-# failure means refetch, re-verify, bump) are measured into PCR2.
+# launcher fetches the KMS-encrypted config and the key ARN from the parent,
+# decrypts it with an attestation, and runs the program named in
+# /etc/enclave/app (key-gen) with exactly the config's environment and
+# forwards. The image's USER/WORKDIR do not apply. /etc/enclave/app and the
+# RDS CA bundle (/etc/enclave/rds-ca.pem, pinned by sha256; AWS updates it, so
+# a checksum failure means refetch, re-verify, bump) are measured into PCR2.
 FROM scratch AS eif-builder
-ARG KMS_KEY_ALIAS_ARN=arn:aws:kms:eu-central-1:575490177671:alias/oprf-nitro-enclave
 COPY --from=core-busybox . /
 COPY --from=core-findutils . /
 COPY --from=core-musl . /
@@ -153,9 +152,9 @@ ENV CMDLINE="reboot=k panic=30 pci=off nomodules console=ttyS0 i8042.noaux i8042
 # ADD keeps the server's mtime; ADD --chmod would also apply the mode to the
 # parent dirs it creates.
 RUN set -eu; \
-    printf '%s\n' "$KMS_KEY_ALIAS_ARN" > /rootfs/etc/enclave/kms-key-alias; \
-    chmod 0644 /rootfs/etc/enclave/kms-key-alias /rootfs/etc/enclave/rds-ca.pem; \
-    touch -d @0 /rootfs/etc/enclave/kms-key-alias /rootfs/etc/enclave/rds-ca.pem; \
+    printf '%s\n' /app/taceo-oprf-key-gen > /rootfs/etc/enclave/app; \
+    chmod 0644 /rootfs/etc/enclave/app /rootfs/etc/enclave/rds-ca.pem; \
+    touch -d @0 /rootfs/etc/enclave/app /rootfs/etc/enclave/rds-ca.pem; \
     mkdir /out; \
     printf '%s\n' 'dir /dev 0755 0 0' 'nod /dev/console 0600 0 0 c 5 1' \
         'file /init /nit 0755 0 0' > /bootstrap.list; \
