@@ -3,7 +3,8 @@
 //! With pins, a server is accepted only if its end-entity certificate is byte-for-byte one of the
 //! pinned certificates. The hostname and chain are not checked and there is no CA fallback, but the
 //! handshake signature is always verified, so the server must hold the pinned certificate's key.
-//! Without pins the usual webpki-roots verification applies.
+//! Without pins (`None`) the usual webpki-roots verification applies; a pin set that holds no
+//! certificate is an error, never a fallback to webpki.
 //!
 //! Signature algorithms come from the aws-lc-rs provider, which the config is built with
 //! explicitly, so no process-default provider is needed.
@@ -84,8 +85,8 @@ impl ServerCertVerifier for PinnedVerifier {
     }
 }
 
-/// Builds a client TLS config. `pinned_pem` is a PEM bundle of pinned certificates; `None` or an
-/// empty string selects plain webpki-roots verification.
+/// Builds a client TLS config. `pinned_pem` is a PEM bundle of pinned certificates; `None` selects
+/// plain webpki-roots verification. `Some` without any certificate is an error, never a fallback.
 pub fn pinned_client_config(pinned_pem: Option<&str>) -> Result<Arc<ClientConfig>, TlsError> {
     pinned_client_config_with_roots(pinned_pem, &[])
 }
@@ -97,7 +98,7 @@ fn pinned_client_config_with_roots(
     let provider = Arc::new(aws_lc_rs::default_provider());
     let builder = ClientConfig::builder_with_provider(Arc::clone(&provider))
         .with_safe_default_protocol_versions()?;
-    let config = if let Some(pem) = pinned_pem.filter(|pem| !pem.trim().is_empty()) {
+    let config = if let Some(pem) = pinned_pem {
         let pins = CertificateDer::pem_slice_iter(pem.as_bytes()).collect::<Result<Vec<_>, _>>()?;
         if pins.is_empty() {
             return Err(TlsError::NoCertificate);
@@ -337,8 +338,8 @@ mod tests {
         deadline(async {
             let (server, _) = Server::self_signed(&["localhost"]);
             let port = spawn_server(&server).await;
-            for pem in [None, Some("  \n")] {
-                let cfg = pinned_client_config(pem).unwrap();
+            {
+                let cfg = pinned_client_config(None).unwrap();
                 let err = handshake(&cfg, port, "localhost").await.unwrap_err();
                 assert!(
                     err.to_string().to_lowercase().contains("unknownissuer"),
@@ -347,6 +348,16 @@ mod tests {
             }
         })
         .await;
+    }
+
+    #[test]
+    fn empty_pin_set_is_an_error() {
+        for pem in ["", "  \n"] {
+            assert!(matches!(
+                pinned_client_config(Some(pem)),
+                Err(TlsError::NoCertificate)
+            ));
+        }
     }
 
     #[test]
