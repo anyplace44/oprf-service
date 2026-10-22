@@ -56,7 +56,6 @@ uuid = { workspace = true, features = ["serde", "v4"] }
 [dev-dependencies]
 ark-ff = { workspace = true }
 axum-test = { workspace = true, features = ["ws"] }
-config = { workspace = true }
 itertools = { workspace = true }
 nodes-common = { workspace = true, features = ["api", "postgres", "serde", "test-utils", "web3-asserter"] }
 oprf-client = { package = "taceo-oprf-client", path = "../oprf-client", version = "0.10" }
@@ -65,9 +64,6 @@ oprf-store = { package = "taceo-oprf-store", path = "../oprf-store", version = "
 ] }
 reqwest = { workspace = true, features = ["json"] }
 ruint = { workspace = true, features = ["rand"] }
-rustls = { workspace = true }
-telemetry-batteries = { workspace = true, features = ["metrics-statsd"] }
-url = { workspace = true }
 zeroize = { workspace = true }
 
 [features]

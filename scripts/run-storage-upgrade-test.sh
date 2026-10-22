@@ -573,7 +573,7 @@ generate_master_keys() {
 
 build_binaries() {
     log "Building the node, the dev-client and key-gen"
-    cargo build --release --example taceo-oprf-service-example --example dev-client-example \
+    cargo build --release --bin taceo-oprf-node --example dev-client-example \
         >"$LOG_DIR/build-examples.log" 2>&1 || fail "building the examples failed (see ${LOG_DIR}/build-examples.log)"
     build_keygen_binary || fail "building key-gen failed (see ${LOG_DIR}/build-keygen.log)"
 }

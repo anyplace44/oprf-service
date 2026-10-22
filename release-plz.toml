@@ -90,3 +90,9 @@ name = "taceo-oprf-enclave-host"
 release = false
 publish = false
 changelog_update = false
+
+[[package]]
+name = "taceo-oprf-node"
+release = false
+publish = false
+changelog_update = false
