@@ -21,6 +21,7 @@ path = "src/main.rs"
 [dependencies]
 async-trait = { workspace = true }
 axum = { workspace = true }
+axum-server = { workspace = true }
 config = { workspace = true }
 eyre.workspace = true
 humantime-serde = { workspace = true }
@@ -29,11 +30,16 @@ oprf-client = { package = "taceo-oprf-client", path = "../oprf-client", version 
 oprf-service = { package = "taceo-oprf-service", path = "../oprf-service", version = "0.19" }
 oprf-types = { package = "taceo-oprf-types", path = "../oprf-types", version = "0.16" }
 rustls = { workspace = true }
+secrecy = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["derive"] }
 telemetry-batteries = { workspace = true, features = ["metrics-statsd"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
 tracing.workspace = true
 url = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+rcgen = { workspace = true }
+reqwest = { workspace = true }
 
 [lints]
 workspace = true
