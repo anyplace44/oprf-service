@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use alloy::primitives::Address;
 use clap::{Parser, Subcommand};
@@ -96,6 +96,17 @@ pub struct DevClientConfig {
     /// max wait time for init key-gen/reshare to succeed.
     #[clap(long, env = "OPRF_DEV_CLIENT_WAIT_TIME", default_value="2min", value_parser=humantime::parse_duration)]
     pub max_wait_time: Duration,
+
+    /// PEM file with the certificates to pin for TLS connections to the nodes.
+    ///
+    /// A node is accepted only if it presents exactly one of these certificates (no hostname
+    /// check, no CA fallback). Without it, the usual webpki roots apply.
+    #[clap(long, env = "OPRF_DEV_CLIENT_TLS_PINNED_CERTS")]
+    pub tls_pinned_certs: Option<PathBuf>,
+
+    /// Skip the startup health check of all nodes.
+    #[clap(long, env = "OPRF_DEV_CLIENT_SKIP_HEALTH_CHECK")]
+    pub skip_health_check: bool,
 
     /// Command
     #[command(subcommand)]

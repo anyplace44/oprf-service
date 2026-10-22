@@ -1,0 +1,40 @@
+[package]
+name = "taceo-oprf-enclave-launcher"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Init target for TACEO:OPRF Nitro Enclaves: loopback, TCP<->vsock forwarding, supervision of the app named in /etc/enclave/app."
+readme.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "oprf-enclave-launcher"
+path = "src/main.rs"
+
+[dependencies]
+aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
+base64 = "0.23"
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aws-nitro-enclaves-nsm-api = "0.5"
+aws-sdk-kms = { version = "1", default-features = false, features = ["rt-tokio"] }
+aws-smithy-http-client = { version = "1", features = ["rustls-aws-lc"] }
+libc = "0.2"
+rustls-webpki = { version = "0.103", default-features = false }
+tokio = { workspace = true, features = ["net", "rt", "time"] }
+vsock = "0.5"
+webpki-root-certs = "1"
+
+[dev-dependencies]
+sha2 = "0.10"
+
+[lints]
+workspace = true

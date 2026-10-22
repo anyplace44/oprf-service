@@ -5,7 +5,10 @@ members = [
   "oprf-client",
   "oprf-core",
   "oprf-dev-client",
+  "oprf-enclave-host",
+  "oprf-enclave-launcher",
   "oprf-key-gen",
+  "oprf-node",
   "oprf-service",
   "oprf-test",
   "oprf-types",
@@ -32,6 +35,7 @@ ark-serialize = "0.6"
 async-trait = "0.1"
 axum = "0.8"
 axum-extra = "0.12"
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 axum-test = "20"
 backon = { version = "1.6", default-features = false }
 blake3 = "1"
@@ -62,7 +66,9 @@ reqwest = { version = "0.13", default-features = false, features = [
   "json",
 ] }
 ruint = { version = "1.20", features = ["serde"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "aws_lc_rs"] }
 rustls = "0.23"
+rustls-pki-types = "1"
 secrecy = "0.10"
 semver = "1"
 serde = { version = "1" }
@@ -73,6 +79,7 @@ testcontainers-modules = { version = "0.15" }
 thiserror = { version = "2" }
 tikv-jemallocator = "0.7"
 tokio = { version = "1" }
+tokio-rustls = "0.26"
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 tokio-util = "0.7"
 tower-http = "0.7"

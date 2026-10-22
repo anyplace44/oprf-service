@@ -191,6 +191,7 @@ jobs:
           artifact-name: ${{ inputs.image-name }}-amd64-sbom.spdx.json
           output-file: ${{ runner.temp }}/amd64-sbom.spdx.json
           upload-artifact: true
+          upload-release-assets: false
 
       - name: Run vulnerability scan
         uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
@@ -260,13 +261,26 @@ jobs:
     needs:
       - push
     steps:
+      - name: Check archive secrets
+        id: gate
+        env:
+          AWS_ARCHIVE_ROLE: ${{ secrets.AWS_ARCHIVE_ROLE }}
+        run: |
+          if [ -n "$AWS_ARCHIVE_ROLE" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::AWS_ARCHIVE_ROLE is not set, skipping SBOM upload"
+          fi
+
       - name: Configure AWS Credentials (OIDC)
+        if: steps.gate.outputs.enabled == 'true'
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
           role-to-assume: ${{ secrets.AWS_ARCHIVE_ROLE }}
           aws-region: eu-central-1
 
       - name: Download SBOM artifacts
+        if: steps.gate.outputs.enabled == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: ${{ runner.temp }}/sboms
@@ -274,6 +288,7 @@ jobs:
           merge-multiple: true
 
       - name: Upload file to S3
+        if: steps.gate.outputs.enabled == 'true'
         env:
           AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
         run: |

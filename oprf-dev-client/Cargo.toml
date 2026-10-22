@@ -45,7 +45,6 @@ tokio = { workspace = true, features = [
 ] }
 tracing.workspace = true
 uuid.workspace = true
-webpki-roots = { workspace = true }
 
 [dev-dependencies]
 ark-babyjubjub = { workspace = true }
@@ -53,7 +52,11 @@ ark-ec.workspace = true
 ark-ff = { workspace = true }
 humantime.workspace = true
 rand_chacha = { workspace = true }
+rcgen = { workspace = true }
 rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
 secrecy = { workspace = true }
 telemetry-batteries.workspace = true
-webpki-roots = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "macros", "net"] }
+tokio-rustls = { workspace = true }
+tokio-tungstenite = { workspace = true }

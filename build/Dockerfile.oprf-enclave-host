@@ -1,0 +1,50 @@
+# Parent-side proxy for the oprf-key-gen and oprf-node Nitro Enclaves
+# (oprf-enclave-host), built like build/Dockerfile.oprf-key-gen: StageX,
+# digest-pinned, offline after `cargo fetch`. The image is not measured into
+# the enclaves' PCRs and carries no configuration: a JSON file naming each
+# enclave (CID, KMS key ARN and vsock port, ciphertext file, forward table) is
+# supplied at run time through OPRF_ENCLAVE_HOST_CONFIG (default
+# /etc/oprf-enclave-host/config.json); its paths are as seen in the container.
+#
+# Run on the parent instance. Docker's default seccomp profile rejects
+# AF_VSOCK sockets (bind fails with EPERM); build/enclave/seccomp-vsock.json is
+# that default as shipped with Docker 25.0.14 (Amazon Linux 2023; moby
+# v25.0.14 profiles/seccomp/default.json) plus one rule allowing AF_VSOCK.
+# /dev/vsock itself is not needed. Publish each enclave's inbound TCP ports:
+#   docker run --security-opt seccomp=build/enclave/seccomp-vsock.json \
+#     -p 4321:4321 -p 10000:10000 \
+#     -v /etc/oprf-enclave-host:/etc/oprf-enclave-host:ro <image>
+# The container reaches IMDS (`imds_url` in the config) over bridge
+# networking; the instance's metadata hop limit must be at least 2.
+# Regenerate it from the default that ships with the parent's Docker version:
+#   jq '.syscalls += [{"names":["socket"],"action":"SCMP_ACT_ALLOW",
+#     "args":[{"index":0,"value":40,"op":"SCMP_CMP_EQ"}]}]' default.json
+#
+# StageX release sx2026.09.0 (Rust 1.97.1); same digest as
+# Dockerfile.oprf-key-gen, bump both together.
+FROM docker.io/stagex/pallet-rust:sx2026.09.0@sha256:67f09a98d5b6f7dd99035fc81b2921c2f49f42cd5ac54f63120a3dd1db59b0d4 AS pallet-rust
+
+FROM pallet-rust AS builder
+ENV TZ=UTC LC_ALL=C \
+    CARGO_HOME=/cargo \
+    TARGET=x86_64-unknown-linux-musl
+# Static binary without a build-id note, as for key-gen.
+ENV RUSTFLAGS="-C target-feature=+crt-static -C link-arg=-Wl,--build-id=none"
+WORKDIR /app
+COPY . .
+# --target keeps RUSTFLAGS off proc-macros and build scripts; -p scopes
+# feature unification to this package.
+RUN cargo fetch --locked --target "${TARGET}"
+RUN --network=none cargo build --frozen --locked --profile reproducible \
+    --target "${TARGET}" -p taceo-oprf-enclave-host
+
+FROM scratch AS runtime
+ARG GIT_HASH
+LABEL org.opencontainers.image.revision=$GIT_HASH
+LABEL org.opencontainers.image.vendor=TACEO
+LABEL org.opencontainers.image.source=https://github.com/anyplace44/oprf-service
+LABEL org.opencontainers.image.description="OPRF Nitro enclave host proxy"
+USER 65532:65532
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/reproducible/oprf-enclave-host /oprf-enclave-host
+
+ENTRYPOINT [ "/oprf-enclave-host" ]

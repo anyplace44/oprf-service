@@ -409,7 +409,7 @@ start_oprf_service_nodes() {
         TACEO_OPRF_NODE__BIND_ADDR="0.0.0.0:${port}" \
         TACEO_OPRF_NODE__NODE_URLS="$node_urls_csv" \
         "${dd_env[@]+"${dd_env[@]}"}" \
-        ./target/release/examples/taceo-oprf-service-example >"$LOG_DIR/node${i}.log" 2>&1 &
+        ./target/release/taceo-oprf-node >"$LOG_DIR/node${i}.log" 2>&1 &
         nodes_pids[$i]="$!"
         log "started node${i} with PID ${nodes_pids[$i]} (wallet $wallet)"
     done

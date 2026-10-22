@@ -1,0 +1,39 @@
+name: Build EIF (oprf-key-gen)
+
+# See build-eif.yml. On a `oprf-key-gen-v*` tag the verified EIF and its PCRs are
+# published as a GitHub release.
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'oprf-key-gen-v*'
+  pull_request:
+    paths:
+      # Every input of the image: the binary's workspace crates (cargo tree
+      # -p taceo-oprf-key-gen), the lockfile, the build context and the workflows.
+      - 'build/**'
+      - 'oprf-enclave-launcher/**'
+      - 'artifacts/**'
+      - 'oprf-key-gen/**'
+      - 'oprf-core/**'
+      - 'oprf-types/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.dockerignore'
+      - '.github/workflows/build-eif.yml'
+      - '.github/workflows/build-eif-oprf-key-gen.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  workflow:
+    # A reusable workflow cannot exceed its caller's permissions; only its
+    # release job uses contents: write.
+    permissions:
+      contents: write
+    uses: ./.github/workflows/build-eif.yml
+    with:
+      image-name: oprf-key-gen
+      dockerfile: build/Dockerfile.oprf-key-gen
