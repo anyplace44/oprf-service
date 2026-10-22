@@ -31,6 +31,8 @@ use url::Url;
 use uuid::Uuid;
 
 mod sessions;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod tls;
 mod ws;
 
 /// The version of this crate.
