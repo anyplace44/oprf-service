@@ -27,16 +27,17 @@ use taceo_oprf_enclave_launcher::recipient::RecipientKey;
 /// of hanging it.
 const DECRYPT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Attests a fresh RSA key and has KMS decrypt `bootstrap.ciphertext` to it under `alias_arn`.
-pub(crate) fn decrypt_config(bootstrap: &Bootstrap, alias_arn: &str) -> Result<Vec<u8>, String> {
-    let region = kms_region(alias_arn)?;
+/// Attests a fresh RSA key and has KMS decrypt `bootstrap.ciphertext` to it under `key_arn`
+/// (alias or key ARN; the caller takes it from the bootstrap message).
+pub(crate) fn decrypt_config(bootstrap: &Bootstrap, key_arn: &str) -> Result<Vec<u8>, String> {
+    let region = kms_region(key_arn)?;
     let key = RecipientKey::generate()?;
     let document = attest(key.public_key_der())?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| format!("tokio runtime: {e}"))?;
-    let envelope = runtime.block_on(kms_decrypt(bootstrap, region, alias_arn, document))?;
+    let envelope = runtime.block_on(kms_decrypt(bootstrap, region, key_arn, document))?;
     key.decrypt_envelope(&envelope)
 }
 
@@ -63,7 +64,7 @@ fn attest(public_key: Vec<u8>) -> Result<Vec<u8>, String> {
 async fn kms_decrypt(
     bootstrap: &Bootstrap,
     region: &str,
-    alias_arn: &str,
+    key_arn: &str,
     document: Vec<u8>,
 ) -> Result<Vec<u8>, String> {
     let credentials = Credentials::new(
@@ -90,7 +91,7 @@ async fn kms_decrypt(
         .build();
     let output = aws_sdk_kms::Client::from_conf(config)
         .decrypt()
-        .key_id(alias_arn)
+        .key_id(key_arn)
         .ciphertext_blob(Blob::new(bootstrap.ciphertext.clone()))
         .recipient(recipient)
         .send()

@@ -7017,6 +7017,7 @@ dependencies = [
  "rustls-webpki",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tokio",
  "vsock",
  "webpki-root-certs",

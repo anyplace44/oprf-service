@@ -1,12 +1,18 @@
-//! `nit.target` of the oprf-key-gen Nitro Enclave.
+//! `nit.target` of the OPRF Nitro Enclaves (key-gen and node).
 //!
-//! Streams its own output, and later key-gen's, to the parent's log port;
-//! starts the KMS forward for the alias ARN in `/etc/enclave/kms-key-alias`;
-//! fetches the bootstrap message from the parent, attests and has KMS decrypt
-//! the config blob; writes `/etc/hosts` and starts the blob's forwards; then
-//! runs key-gen as 65532:65532 with exactly the blob's environment and exits
-//! with its status.
+//! Streams its own output, and later the app's, to the parent's log port;
+//! fetches the bootstrap message from the parent, which names the KMS key and
+//! the vsock port for KMS; starts the KMS forward, attests and has KMS decrypt
+//! the config blob; refuses a blob written for another key; writes
+//! `/etc/hosts`, starts the blob's forwards and logs the config hashes; then
+//! runs the program named in `/etc/enclave/app` as 65532:65532 with exactly
+//! the blob's environment and exits with its status.
 
+#[cfg_attr(
+    not(target_os = "linux"),
+    allow(dead_code, reason = "only the Linux runtime uses it outside tests")
+)]
+mod app;
 #[cfg(target_os = "linux")]
 mod enclave;
 #[cfg(target_os = "linux")]
