@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    path::Path,
     str::FromStr as _,
     sync::{
         Arc,
@@ -22,7 +23,7 @@ use oprf_core::{
 };
 use oprf_types::{OprfKeyId, ShareEpoch, api::OprfRequest, async_trait, crypto::OprfPublicKey};
 use rand::{CryptoRng, Rng, SeedableRng};
-use rustls::{ClientConfig, RootCertStore};
+use rustls::ClientConfig;
 use secrecy::ExposeSecret as _;
 use serde::Serialize;
 use tokio::{sync::mpsc, task::JoinSet};
@@ -42,6 +43,7 @@ pub trait DevClient: Send + Sync + 'static {
         &self,
         config: &DevClientConfig,
         provider: DynProvider,
+        client: &reqwest::Client,
     ) -> eyre::Result<Self::Setup>;
 
     async fn run_oprf(
@@ -86,18 +88,31 @@ fn avg(durations: &[Duration]) -> Duration {
     }
 }
 
-pub fn setup_connector() -> Connector {
-    let mut root_store = RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let rustls_config = ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-    Connector::Rustls(Arc::new(rustls_config))
+/// Reads the pinned certificates from `pinned_certs` (a PEM file) and builds the one TLS config
+/// shared by the WebSocket connector and the HTTP client. Without a file the webpki roots apply.
+pub fn load_tls_config(pinned_certs: Option<&Path>) -> eyre::Result<Arc<ClientConfig>> {
+    let pem = pinned_certs
+        .map(|path| {
+            std::fs::read_to_string(path)
+                .with_context(|| format!("while reading pinned certificates {}", path.display()))
+        })
+        .transpose()?;
+    oprf_client::tls::pinned_client_config(pem.as_deref())
+        .context("while building the TLS configuration")
 }
 
-pub async fn delete_test(config: DevClientConfig, provider: DynProvider) -> eyre::Result<()> {
+pub fn setup_connector(tls_config: &Arc<ClientConfig>) -> Connector {
+    oprf_client::tls::connector(tls_config)
+}
+
+pub async fn delete_test(
+    config: DevClientConfig,
+    provider: DynProvider,
+    client: &reqwest::Client,
+) -> eyre::Result<()> {
     tracing::info!("creating new key to delete afterwards");
     let (oprf_key_id, _) = init_key_gen(
+        client,
         &config.nodes,
         config.oprf_key_registry_contract,
         provider.clone(),
@@ -108,7 +123,8 @@ pub async fn delete_test(config: DevClientConfig, provider: DynProvider) -> eyre
     contract::delete_oprf_key_material(provider, config.oprf_key_registry_contract, oprf_key_id)
         .await?;
     tracing::info!("sent delete event - ping nodes to check this works");
-    health_checks::assert_key_id_unknown(oprf_key_id, &config.nodes, config.max_wait_time).await?;
+    health_checks::assert_key_id_unknown(client, oprf_key_id, &config.nodes, config.max_wait_time)
+        .await?;
     tracing::info!("successfully deleted key-material");
     Ok(())
 }
@@ -229,6 +245,7 @@ pub async fn send_finish_requests(
 }
 
 pub async fn init_key_gen(
+    client: &reqwest::Client,
     nodes: &[String],
     oprf_key_registry: Address,
     provider: DynProvider,
@@ -240,6 +257,7 @@ pub async fn init_key_gen(
     contract::init_key_gen(provider, oprf_key_registry, oprf_key_id).await?;
     tracing::info!("waiting for key-gen to finish..");
     let oprf_public_key = health_checks::oprf_public_key_from_services(
+        client,
         oprf_key_id,
         ShareEpoch::default(),
         nodes,
@@ -251,6 +269,7 @@ pub async fn init_key_gen(
 }
 
 async fn stress_test_key_gen(
+    client: &reqwest::Client,
     cmd: StressTestKeyGenCommand,
     nodes: &[String],
     oprf_key_registry: Address,
@@ -266,8 +285,10 @@ async fn stress_test_key_gen(
         contract::init_key_gen(provider.clone(), oprf_key_registry, oprf_key_id).await?;
         key_gens.spawn({
             let nodes = nodes.to_vec();
+            let client = client.clone();
             async move {
                 health_checks::oprf_public_key_from_services(
+                    &client,
                     oprf_key_id,
                     ShareEpoch::default(),
                     &nodes,
@@ -289,8 +310,10 @@ async fn stress_test_key_gen(
         // do an oprf to check if correct
         reshares.spawn({
             let nodes = nodes.to_vec();
+            let client = client.clone();
             async move {
                 health_checks::oprf_public_key_from_services(
+                    &client,
                     key_id,
                     ShareEpoch::default().next(),
                     &nodes,
@@ -319,10 +342,10 @@ async fn delegate_test<T: DevClient>(
     config: DevClientConfig,
     cmd: DelegateTestCommand,
     setup: T::Setup,
+    client: &reqwest::Client,
 ) -> eyre::Result<()> {
-    let client = reqwest::Client::new();
     dev_client
-        .run_delegate_oprf(&config, setup, cmd.delegate_service, &client)
+        .run_delegate_oprf(&config, setup, cmd.delegate_service, client)
         .await?;
     Ok(())
 }
@@ -493,12 +516,20 @@ async fn wait_for_epoch(
 }
 
 pub async fn run<T: DevClient>(config: DevClientConfig, dev_client: T) -> eyre::Result<()> {
-    tracing::info!("health check for all nodes...");
-    health_checks::services_health_check(&config.nodes, Duration::from_secs(5))
-        .await
-        .context("while doing health checks")?;
+    let tls_config = load_tls_config(config.tls_pinned_certs.as_deref())?;
+    let client =
+        oprf_client::tls::http_client(&tls_config).context("while building HTTP client")?;
+    let connector = setup_connector(&tls_config);
 
-    tracing::info!("everyone online..");
+    if config.skip_health_check {
+        tracing::info!("skipping health check for all nodes");
+    } else {
+        tracing::info!("health check for all nodes...");
+        health_checks::services_health_check(&client, &config.nodes, Duration::from_secs(5))
+            .await
+            .context("while doing health checks")?;
+        tracing::info!("everyone online..");
+    }
 
     let private_key = PrivateKeySigner::from_str(config.taceo_private_key.expose_secret())?;
     let wallet = EthereumWallet::from(private_key.clone());
@@ -510,13 +541,12 @@ pub async fn run<T: DevClient>(config: DevClientConfig, dev_client: T) -> eyre::
         .await
         .context("while connecting to RPC")?
         .erased();
-    let connector = setup_connector();
 
     match config.command.clone() {
         Command::Test => {
             tracing::info!("running oprf-test");
             let setup = dev_client
-                .setup_oprf_test(&config, provider.clone())
+                .setup_oprf_test(&config, provider.clone(), &client)
                 .await?;
             tracing::info!("starting oprf computation");
             dev_client.run_oprf(&config, setup, connector).await?;
@@ -524,21 +554,21 @@ pub async fn run<T: DevClient>(config: DevClientConfig, dev_client: T) -> eyre::
         }
         Command::DeleteTest => {
             tracing::info!("running delete-test");
-            delete_test(config, provider).await?;
+            delete_test(config, provider, &client).await?;
             tracing::info!("oprf delete test successful");
         }
         Command::DelegateTest(cmd) => {
             tracing::info!("running delegate-test");
             let setup = dev_client
-                .setup_oprf_test(&config, provider.clone())
+                .setup_oprf_test(&config, provider.clone(), &client)
                 .await?;
-            delegate_test(dev_client, config, cmd, setup).await?;
+            delegate_test(dev_client, config, cmd, setup, &client).await?;
             tracing::info!("oprf delegate test successful");
         }
         Command::StressTestOprf(cmd) => {
             tracing::info!("running oprf stress-test");
             let setup = dev_client
-                .setup_oprf_test(&config, provider.clone())
+                .setup_oprf_test(&config, provider.clone(), &client)
                 .await?;
             stress_test(dev_client, config, cmd, setup, connector).await?;
             tracing::info!("stress-test successful");
@@ -546,6 +576,7 @@ pub async fn run<T: DevClient>(config: DevClientConfig, dev_client: T) -> eyre::
         Command::StressTestKeyGen(cmd) => {
             tracing::info!("running key-gen stress-test");
             stress_test_key_gen(
+                &client,
                 cmd,
                 &config.nodes,
                 config.oprf_key_registry_contract,
@@ -558,7 +589,7 @@ pub async fn run<T: DevClient>(config: DevClientConfig, dev_client: T) -> eyre::
         Command::ReshareTest(ReshareTest { acceptance_num }) => {
             tracing::info!("running reshare-test");
             let setup = dev_client
-                .setup_oprf_test(&config, provider.clone())
+                .setup_oprf_test(&config, provider.clone(), &client)
                 .await?;
             reshare_test(
                 dev_client,

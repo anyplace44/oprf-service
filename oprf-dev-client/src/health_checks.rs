@@ -4,9 +4,9 @@ use oprf_types::{OprfKeyId, ShareEpoch, api::OprfPublicKeyWithEpoch, crypto::Opr
 use reqwest::StatusCode;
 use tokio::task::JoinSet;
 
-async fn health_check(health_url: String) {
+async fn health_check(client: reqwest::Client, health_url: String) {
     loop {
-        if let Ok(resp) = reqwest::get(&health_url).await
+        if let Ok(resp) = client.get(&health_url).send().await
             && let Ok(resp) = resp.error_for_status()
             && let Ok(msg) = resp.text().await
             && msg == "healthy"
@@ -18,11 +18,15 @@ async fn health_check(health_url: String) {
     tracing::info!("healthy: {health_url}");
 }
 
-pub async fn service_down(service: &str, max_wait_time: Duration) -> eyre::Result<()> {
+pub async fn service_down(
+    client: &reqwest::Client,
+    service: &str,
+    max_wait_time: Duration,
+) -> eyre::Result<()> {
     let health_url = format!("{service}/health");
     tokio::time::timeout(max_wait_time, async move {
         loop {
-            if reqwest::get(&health_url).await.is_err() {
+            if client.get(&health_url).send().await.is_err() {
                 break;
             }
             tokio::time::sleep(Duration::from_secs(1)).await;
@@ -33,12 +37,13 @@ pub async fn service_down(service: &str, max_wait_time: Duration) -> eyre::Resul
 }
 
 pub async fn services_health_check(
+    client: &reqwest::Client,
     services: &[String],
     max_wait_time: Duration,
 ) -> eyre::Result<()> {
     let health_checks = services
         .iter()
-        .map(|service| health_check(format!("{service}/health")))
+        .map(|service| health_check(client.clone(), format!("{service}/health")))
         .collect::<JoinSet<_>>();
 
     tokio::time::timeout(max_wait_time, health_checks.join_all())
@@ -47,9 +52,15 @@ pub async fn services_health_check(
     Ok(())
 }
 
-pub async fn load_oprf_public_key(oprf_key_url: String, epoch: ShareEpoch) -> OprfPublicKey {
+pub async fn load_oprf_public_key(
+    client: reqwest::Client,
+    oprf_key_url: String,
+    epoch: ShareEpoch,
+) -> OprfPublicKey {
     loop {
-        if let Ok(response) = reqwest::get(&oprf_key_url)
+        if let Ok(response) = client
+            .get(&oprf_key_url)
+            .send()
             .await
             .and_then(|response| response.error_for_status())
             && let Ok(material) = response.json::<OprfPublicKeyWithEpoch>().await
@@ -62,6 +73,7 @@ pub async fn load_oprf_public_key(oprf_key_url: String, epoch: ShareEpoch) -> Op
 }
 
 pub async fn oprf_public_key_from_services(
+    client: &reqwest::Client,
     oprf_key_id: OprfKeyId,
     epoch: ShareEpoch,
     services: &[String],
@@ -69,7 +81,13 @@ pub async fn oprf_public_key_from_services(
 ) -> eyre::Result<OprfPublicKey> {
     let oprf_public_key_checks = services
         .iter()
-        .map(|service| load_oprf_public_key(format!("{service}/oprf_pub/{oprf_key_id}"), epoch))
+        .map(|service| {
+            load_oprf_public_key(
+                client.clone(),
+                format!("{service}/oprf_pub/{oprf_key_id}"),
+                epoch,
+            )
+        })
         .collect::<JoinSet<_>>();
     match tokio::time::timeout(max_wait_time, oprf_public_key_checks.join_all())
         .await
@@ -87,9 +105,11 @@ pub async fn oprf_public_key_from_services(
         Err(_) => eyre::bail!("couldn't load OPRF material within time"),
     }
 }
-pub async fn oprf_public_key_not_known_check(health_url: String) {
+pub async fn oprf_public_key_not_known_check(client: reqwest::Client, health_url: String) {
     loop {
-        if let Err(err) = reqwest::get(&health_url)
+        if let Err(err) = client
+            .get(&health_url)
+            .send()
             .await
             .and_then(|response| response.error_for_status())
             && err.status() == Some(StatusCode::NOT_FOUND)
@@ -101,13 +121,19 @@ pub async fn oprf_public_key_not_known_check(health_url: String) {
 }
 
 pub async fn assert_key_id_unknown(
+    client: &reqwest::Client,
     oprf_key_id: OprfKeyId,
     services: &[String],
     max_wait_time: Duration,
 ) -> eyre::Result<()> {
     let health_checks = services
         .iter()
-        .map(|service| oprf_public_key_not_known_check(format!("{service}/oprf_pub/{oprf_key_id}")))
+        .map(|service| {
+            oprf_public_key_not_known_check(
+                client.clone(),
+                format!("{service}/oprf_pub/{oprf_key_id}"),
+            )
+        })
         .collect::<JoinSet<_>>();
     tokio::time::timeout(max_wait_time, health_checks.join_all())
         .await
