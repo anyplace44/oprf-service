@@ -38,6 +38,7 @@ aws-config = { version = "1", default-features = false, features = ["behavior-ve
 aws-sdk-kms = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 axum = "0.8"
 axum-extra = "0.12"
+axum-server = { version = "0.8", default-features = false, features = ["tls-rustls-no-provider"] }
 axum-test = "20"
 backon = { version = "1.6", default-features = false }
 blake3 = "1"
