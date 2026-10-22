@@ -31,11 +31,16 @@ uuid = { workspace = true, features = ["v4"] }
 axum = { workspace = true }
 axum-test = { workspace = true, features = ["ws"] }
 rand.workspace = true
-tokio = { workspace = true }
+rcgen = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "time", "net", "io-util"] }
+tokio-rustls = { workspace = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
+webpki-roots = { workspace = true }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }
