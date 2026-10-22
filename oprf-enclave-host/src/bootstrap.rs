@@ -2,7 +2,7 @@
 //! role's credentials, to CID 16 only.
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -48,27 +48,35 @@ pub async fn read_ciphertext(path: &Path) -> eyre::Result<Vec<u8>> {
         .with_context(|| format!("decoding base64 in {}", path.display()))
 }
 
-async fn make(ciphertext: &Path, imds_url: &str) -> eyre::Result<Bootstrap> {
-    let ciphertext = read_ciphertext(ciphertext).await?;
+/// Where the bootstrap line's parts come from.
+pub struct Source {
+    /// File holding the base64 ciphertext.
+    pub ciphertext: PathBuf,
+    /// Instance metadata service for the role credentials.
+    pub imds_url: String,
+    /// Sent as [`Bootstrap::kms_key_arn`].
+    pub kms_key_arn: String,
+    /// Sent as [`Bootstrap::kms_vsock_port`].
+    pub kms_vsock_port: u32,
+}
+
+async fn make(source: &Source) -> eyre::Result<Bootstrap> {
+    let ciphertext = read_ciphertext(&source.ciphertext).await?;
     let (access_key_id, secret_access_key, session_token) =
-        imds::role_credentials(imds_url).await?;
+        imds::role_credentials(&source.imds_url).await?;
     Ok(Bootstrap {
         ciphertext,
         access_key_id,
         secret_access_key,
         session_token,
+        kms_key_arn: source.kms_key_arn.clone(),
+        kms_vsock_port: source.kms_vsock_port,
     })
 }
 
 /// Serves one connection and records the outcome.
-pub async fn handle<W: AsyncWrite + Unpin>(
-    peer_cid: u32,
-    allowed_cid: u32,
-    w: W,
-    ciphertext: &Path,
-    imds_url: &str,
-) {
-    let outcome = match answer(peer_cid, allowed_cid, w, make(ciphertext, imds_url)).await {
+pub async fn handle<W: AsyncWrite + Unpin>(peer_cid: u32, allowed_cid: u32, w: W, source: &Source) {
+    let outcome = match answer(peer_cid, allowed_cid, w, make(source)).await {
         Ok(true) => "served",
         Ok(false) => {
             tracing::warn!(peer_cid, "bootstrap connection from foreign CID refused");
@@ -93,6 +101,8 @@ mod tests {
             access_key_id: "AK".into(),
             secret_access_key: "SK".into(),
             session_token: "ST".into(),
+            kms_key_arn: "arn:aws:kms:eu-central-1:111122223333:alias/test".into(),
+            kms_vsock_port: 8000,
         }
     }
 
