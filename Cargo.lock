@@ -6897,6 +6897,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "taceo-oprf-node"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "config",
+ "eyre",
+ "humantime-serde",
+ "rustls",
+ "serde",
+ "taceo-nodes-common",
+ "taceo-oprf-client",
+ "taceo-oprf-service",
+ "taceo-oprf-types",
+ "telemetry-batteries",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "taceo-oprf-service"
 version = "0.19.4"
 dependencies = [
@@ -6909,7 +6930,6 @@ dependencies = [
  "axum-test",
  "backon",
  "ciborium",
- "config",
  "eyre",
  "http 1.5.0",
  "humantime-serde",
@@ -6920,7 +6940,6 @@ dependencies = [
  "rand 0.8.6",
  "reqwest",
  "ruint",
- "rustls",
  "secrecy",
  "semver 1.0.28",
  "serde",
@@ -6931,14 +6950,12 @@ dependencies = [
  "taceo-oprf-client",
  "taceo-oprf-core",
  "taceo-oprf-types",
- "telemetry-batteries",
  "thiserror 2.0.21",
  "tokio",
  "tokio-util",
  "tower-http 0.7.1",
  "tracing",
  "tungstenite",
- "url",
  "uuid",
  "zeroize",
 ]
