@@ -6971,8 +6971,10 @@ dependencies = [
  "humantime",
  "rand 0.8.6",
  "rand_chacha 0.3.1",
+ "rcgen",
  "reqwest",
  "rustls",
+ "rustls-pki-types",
  "secrecy",
  "serde",
  "taceo-ark-babyjubjub",
@@ -6981,9 +6983,10 @@ dependencies = [
  "taceo-oprf-types",
  "telemetry-batteries",
  "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
  "tracing",
  "uuid",
- "webpki-roots 1.0.10",
 ]
 
 [[package]]
