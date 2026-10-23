@@ -108,6 +108,7 @@ mod tests {
             kms_vsock_port: port,
             ciphertext,
             table: Table::default(),
+            inbound_tls: None,
         }
     }
 

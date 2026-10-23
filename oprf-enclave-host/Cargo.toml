@@ -21,14 +21,21 @@ eyre.workspace = true
 metrics.workspace = true
 # Unreleased: the proxy landed in worldcoin/pontifex#64; switch to 3.1.0 once published.
 reqwest = { workspace = true, features = ["json"] }
+rustls.workspace = true
+rustls-pki-types.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 pontifex = { git = "https://github.com/worldcoin/pontifex", rev = "19647bd445ada4ab0b8127e1df5c3c03623b6ea1", default-features = false, features = ["proxy"] }
 telemetry-batteries = { workspace = true, features = ["metrics-statsd"] }
 tokio = { workspace = true, features = ["fs", "io-std", "io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-rustls.workspace = true
 tokio-vsock = "0.7"
 tracing.workspace = true
 launcher = { package = "taceo-oprf-enclave-launcher", path = "../oprf-enclave-launcher" }
+
+[dev-dependencies]
+rcgen.workspace = true
+oprf-client = { package = "taceo-oprf-client", path = "../oprf-client" }
 
 [lints]
 workspace = true

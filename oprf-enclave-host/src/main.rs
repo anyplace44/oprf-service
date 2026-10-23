@@ -13,6 +13,7 @@ mod bootstrap;
 mod config;
 mod imds;
 mod logsink;
+mod tls;
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -30,12 +31,15 @@ use pontifex::proxy;
 use tokio::io::{AsyncRead, AsyncWrite, BufReader};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
+use tokio_rustls::TlsAcceptor;
 use tokio_vsock::{VMADDR_CID_ANY, VsockAddr, VsockListener, VsockStream};
 
 use crate::config::HostConfig;
 
 /// Bounds dialing the enclave for an inbound connection.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(4);
+/// Bounds the TLS handshake of an inbound connection.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const METRICS_OUTBOUND: &str = "taceo.oprf.enclave_host.outbound";
 const METRICS_INBOUND: &str = "taceo.oprf.enclave_host.inbound";
 
@@ -150,10 +154,34 @@ fn record_outbound(vsock_port: u32, event: proxy::Event) {
         .increment(1);
 }
 
-/// Relays every connection accepted on `listener` to a stream from `dial`.
-async fn serve_inbound<D, F, S>(listener: TcpListener, dial: D) -> Infallible
+/// Dials the enclave and relays `client` to it; returns the event to count.
+async fn relay<C, F, S>(mut client: C, dialing: F) -> &'static str
 where
-    D: Fn() -> F,
+    C: AsyncRead + AsyncWrite + Unpin,
+    F: Future<Output = std::io::Result<S>>,
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    match tokio::time::timeout(CONNECT_TIMEOUT, dialing).await {
+        Ok(Ok(mut enclave)) => match tokio::io::copy_bidirectional(&mut client, &mut enclave).await
+        {
+            Ok(_) => "completed",
+            Err(_) => "io",
+        },
+        Ok(Err(_)) => "connect_failed",
+        Err(_) => "connect_timed_out",
+    }
+}
+
+/// Relays every connection accepted on `listener` to a stream from `dial`. With `tls`, the
+/// handshake comes first and the enclave only ever sees the plaintext; a failed handshake is
+/// counted and the enclave is not dialed.
+async fn serve_inbound<D, F, S>(
+    listener: TcpListener,
+    dial: D,
+    tls: Option<TlsAcceptor>,
+) -> Infallible
+where
+    D: Fn() -> F + Clone + Send + 'static,
     F: Future<Output = std::io::Result<S>> + Send + 'static,
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -161,7 +189,7 @@ where
         .local_addr()
         .map_or_else(|_| String::new(), |a| a.port().to_string());
     loop {
-        let (mut tcp, peer) = match listener.accept().await {
+        let (tcp, peer) = match listener.accept().await {
             Ok(accepted) => accepted,
             Err(err) => {
                 tracing::warn!(%err, "inbound accept failed");
@@ -170,18 +198,18 @@ where
                 continue;
             }
         };
-        let dialing = dial();
+        let dial = dial.clone();
+        let tls = tls.clone();
         let port = port.clone();
         tokio::spawn(async move {
-            let event = match tokio::time::timeout(CONNECT_TIMEOUT, dialing).await {
-                Ok(Ok(mut enclave)) => {
-                    match tokio::io::copy_bidirectional(&mut tcp, &mut enclave).await {
-                        Ok(_) => "completed",
-                        Err(_) => "io",
+            let event = match tls {
+                None => relay(tcp, dial()).await,
+                Some(acceptor) => {
+                    match tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(tcp)).await {
+                        Ok(Ok(stream)) => relay(stream, dial()).await,
+                        Ok(Err(_)) | Err(_) => "tls_handshake_failed",
                     }
                 }
-                Ok(Err(_)) => "connect_failed",
-                Err(_) => "connect_timed_out",
             };
             if event != "completed" {
                 tracing::warn!(%peer, event, "inbound connection failed");
@@ -213,9 +241,16 @@ async fn main() -> eyre::Result<()> {
                 .await
                 .with_context(|| format!("binding inbound port {}", i.tcp_port))?;
             let addr = VsockAddr::new(enclave.cid, i.vsock_port);
-            tracing::info!(enclave = %enclave.name, port = i.tcp_port, %addr, "inbound relay");
+            let tls = match &enclave.inbound_tls {
+                Some(t) if t.port == i.tcp_port => Some(
+                    tls::acceptor(&t.cert_pem, &t.key_pem)
+                        .with_context(|| format!("enclave {}: inbound_tls", enclave.name))?,
+                ),
+                _ => None,
+            };
+            tracing::info!(enclave = %enclave.name, port = i.tcp_port, %addr, tls = tls.is_some(), "inbound relay");
             tasks.spawn(async move {
-                match serve_inbound(listener, move || VsockStream::connect(addr)).await {}
+                match serve_inbound(listener, move || VsockStream::connect(addr), tls).await {}
             });
         }
     }
@@ -233,6 +268,9 @@ async fn main() -> eyre::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;
@@ -283,9 +321,11 @@ mod tests {
 
         let front = TcpListener::bind("127.0.0.1:0").await.expect("bind front");
         let front_addr = front.local_addr().expect("front addr");
-        tokio::spawn(serve_inbound(front, move || {
-            TcpStream::connect(enclave_addr)
-        }));
+        tokio::spawn(serve_inbound(
+            front,
+            move || TcpStream::connect(enclave_addr),
+            None,
+        ));
 
         let mut client = TcpStream::connect(front_addr).await.expect("connect");
         client.write_all(b"hello").await.expect("write");
@@ -334,5 +374,105 @@ mod tests {
         })
         .await
         .expect("test deadline");
+    }
+
+    async fn deadline<T>(f: impl Future<Output = T>) -> T {
+        tokio::time::timeout(Duration::from_secs(10), f)
+            .await
+            .expect("test exceeded 10 s")
+    }
+
+    /// An enclave stand-in that echoes one connection and records the bytes it received.
+    struct Fixture {
+        front: std::net::SocketAddr,
+        cert_pem: String,
+        dials: Arc<AtomicUsize>,
+        received: Arc<Mutex<Vec<u8>>>,
+    }
+
+    async fn tls_fixture() -> Fixture {
+        let ck = rcgen::generate_simple_self_signed(vec!["localhost".to_owned()]).expect("cert");
+        let cert_pem = ck.cert.pem();
+        let acceptor = tls::acceptor(&cert_pem, &ck.signing_key.serialize_pem()).expect("acceptor");
+        let enclave = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let enclave_addr = enclave.local_addr().expect("addr");
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&received);
+        tokio::spawn(async move {
+            loop {
+                let (mut s, _) = enclave.accept().await.expect("accept");
+                let mut buf = Vec::new();
+                s.read_to_end(&mut buf).await.expect("read");
+                seen.lock().expect("lock").extend_from_slice(&buf);
+                s.write_all(&buf).await.expect("write");
+            }
+        });
+        let dials = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&dials);
+        let front = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let front_addr = front.local_addr().expect("addr");
+        tokio::spawn(serve_inbound(
+            front,
+            move || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                TcpStream::connect(enclave_addr)
+            },
+            Some(acceptor),
+        ));
+        Fixture {
+            front: front_addr,
+            cert_pem,
+            dials,
+            received,
+        }
+    }
+
+    async fn tls_echo(f: &Fixture, payload: &[u8]) -> Vec<u8> {
+        let config = oprf_client::tls::pinned_client_config(Some(&f.cert_pem)).expect("config");
+        let tcp = TcpStream::connect(f.front).await.expect("connect");
+        let name = rustls_pki_types::ServerName::try_from("localhost").expect("name");
+        let mut tls = tokio_rustls::TlsConnector::from(config)
+            .connect(name, tcp)
+            .await
+            .expect("handshake");
+        tls.write_all(payload).await.expect("write");
+        tls.shutdown().await.expect("shutdown");
+        let mut reply = Vec::new();
+        tls.read_to_end(&mut reply).await.expect("read");
+        reply
+    }
+
+    #[tokio::test]
+    async fn tls_inbound_relays_plaintext_to_enclave() {
+        deadline(async {
+            let f = tls_fixture().await;
+            assert_eq!(tls_echo(&f, b"hello").await, b"hello");
+            assert_eq!(
+                *f.received.lock().expect("lock"),
+                b"hello",
+                "the enclave receives plaintext"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn garbage_client_does_not_stop_listener() {
+        deadline(async {
+            let f = tls_fixture().await;
+            let mut bad = TcpStream::connect(f.front).await.expect("connect");
+            bad.write_all(b"GET / HTTP/1.0\r\n\r\n")
+                .await
+                .expect("write");
+            let mut sink = Vec::new();
+            bad.read_to_end(&mut sink).await.ok();
+            assert_eq!(tls_echo(&f, b"after").await, b"after");
+            assert_eq!(
+                f.dials.load(Ordering::SeqCst),
+                1,
+                "only the proper client reached the enclave"
+            );
+        })
+        .await;
     }
 }
