@@ -101,3 +101,38 @@ pub struct AttestationError {
     /// The check that failed.
     pub failure: AttestationFailure,
 }
+
+/// Whether OPRF calls attest the nodes they contact (the switch).
+///
+/// With [`Attestation::EveryCall`], every WebSocket session (and every `/delegate`
+/// POST) is preceded by an attestation of that node with a fresh nonce; a failed
+/// attestation is that node's error ([`crate::NodeError::Attestation`]) and nothing
+/// is sent to it.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum Attestation {
+    /// No attestation before OPRF calls (attest on demand with [`attest`]).
+    OnDemand,
+    /// Attest every node before every OPRF call.
+    EveryCall {
+        /// The expected values per node.
+        policy: std::sync::Arc<AttestationPolicy>,
+        /// The client for the WebSocket path's `GET /attestation` requests. Build it
+        /// from the same TLS config as the WebSocket connector (e.g. with
+        /// [`crate::tls::http_client`]), so attestation uses the same trust as the OPRF
+        /// transport. The `/delegate` path uses the delegate call's own client instead.
+        http: reqwest::Client,
+    },
+}
+
+/// Whether OPRF calls attest the nodes they contact (the switch).
+///
+/// Attestation is native only; on `wasm32` the only setting is [`Attestation::OnDemand`].
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub enum Attestation {
+    /// No attestation before OPRF calls.
+    OnDemand,
+}

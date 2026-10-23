@@ -91,6 +91,8 @@ where
         u16::from(state.threshold) as usize,
         req,
         state.connector,
+        // the switch covers the client's own hops only, not the delegate's fan-out
+        &oprf_client::Attestation::OnDemand,
     )
     .await
     {

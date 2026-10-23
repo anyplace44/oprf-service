@@ -113,6 +113,7 @@ impl DevClient for ExampleDevClient {
             domain_separator,
             auth,
             connector,
+            &oprf_client::Attestation::OnDemand,
         )
         .await?;
 
@@ -154,6 +155,7 @@ impl DevClient for ExampleDevClient {
             domain_separator,
             auth,
             client,
+            &oprf_client::Attestation::OnDemand,
         )
         .await?;
 
