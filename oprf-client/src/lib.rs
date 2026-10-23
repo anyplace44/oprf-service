@@ -39,6 +39,7 @@ mod ws;
 /// The version of this crate.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub use attestation::Attestation;
 pub use http::Uri;
 pub use http::uri::InvalidUri;
 pub use sessions::OprfSessions;
@@ -265,6 +266,9 @@ pub enum NodeError {
     /// This node sent back the wrapped epoch.
     #[error("ShareEpoch mismatch - got epoch: {0}")]
     EpochMismatch(ShareEpoch),
+    /// With [`Attestation::EveryCall`], the node failed attestation; nothing was sent to it.
+    #[error(transparent)]
+    Attestation(attestation::AttestationError),
     /// Represents an unknown or unexpected error.
     ///
     /// Primarily included for forward compatibility and future-proofing.
@@ -280,6 +284,7 @@ impl PartialEq for NodeError {
                 lhs == rhs
             }
             (Self::EpochMismatch(lhs), Self::EpochMismatch(rhs)) => lhs == rhs,
+            (Self::Attestation(lhs), Self::Attestation(rhs)) => lhs == rhs,
             _ => false,
         }
     }
@@ -364,6 +369,10 @@ pub enum Error {
     /// The order of errors in the contained `Vec<NodeError>` does **not** reflect the order of URIs passed to [`distributed_oprf`].
     #[error("Nodes could not agree on error")]
     NodeErrorDisagreement(Vec<NodeError>),
+    /// With [`Attestation::EveryCall`], these nodes failed attestation (in the order
+    /// their errors were collected). Reported whenever any node failed attestation.
+    #[error("{}", join_attestation_errors(.0))]
+    Attestation(Vec<attestation::AttestationError>),
     /// Represents an unknown or unexpected error.
     ///
     /// Primarily included for forward compatibility and future-proofing.
@@ -385,8 +394,18 @@ pub enum Error {
     },
 }
 
+fn join_attestation_errors(errors: &[attestation::AttestationError]) -> String {
+    errors
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// Aggregates errors returned by nodes.
 ///
+/// - If any node failed attestation, returns `Attestation` with every attestation error, in order
+///   (before any threshold arithmetic, so an attestation failure is never reported as something else).
 /// - If `threshold` nodes returned the same `ServiceError`, returns a consensus service error.
 /// - If `threshold` nodes returned the same `UnexpectedMessage`, returns that consensus.
 /// - If `threshold` nodes returned `WsError`s, collects them into a networking error.
@@ -395,6 +414,21 @@ pub enum Error {
 ///
 /// Internal use only.
 fn aggregate_error(threshold: usize, errors: Vec<NodeError>) -> Error {
+    if errors
+        .iter()
+        .any(|err| matches!(err, NodeError::Attestation(_)))
+    {
+        return Error::Attestation(
+            errors
+                .into_iter()
+                .filter_map(|err| match err {
+                    NodeError::Attestation(err) => Some(err),
+                    _ => None,
+                })
+                .collect(),
+        );
+    }
+
     let mut service_errors = HashMap::new();
     let mut ws_errors_counters = 0;
     let mut unexpected_message = HashMap::new();
@@ -489,6 +523,7 @@ pub struct VerifiableOprfOutput {
 /// - `domain_separator`: Domain separator used in the final Poseidon hash to derive the output
 /// - `auth`: Implementation specific authentication request forwarded to each OPRF node as part of the request
 /// - `connector`: TLS connector configuration for the WebSocket connections
+/// - `attestation`: with [`Attestation::EveryCall`], each node is attested before its session is opened (see [`init_sessions`])
 ///
 /// # Timeout and Cancellation
 ///
@@ -520,6 +555,10 @@ pub struct VerifiableOprfOutput {
     clippy::missing_panics_doc,
     reason = "Can't really panic due to promises from called method"
 )]
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the public API takes the attestation switch as its last argument"
+)]
 pub async fn distributed_oprf<OprfRequestAuth>(
     services: &[Uri],
     threshold: usize,
@@ -528,6 +567,7 @@ pub async fn distributed_oprf<OprfRequestAuth>(
     domain_separator: ark_babyjubjub::Fq,
     auth: OprfRequestAuth,
     connector: Connector,
+    attestation: &Attestation,
 ) -> Result<VerifiableOprfOutput, Error>
 where
     OprfRequestAuth: Clone + Serialize + 'static,
@@ -547,7 +587,7 @@ where
     };
 
     let (oprf_public_key, epoch, challenge, responses) =
-        distributed_oprf_core(services, threshold, oprf_req, connector).await?;
+        distributed_oprf_core(services, threshold, oprf_req, connector, attestation).await?;
 
     finalize_distributed_oprf(FinalizeDistributedOprfArgs {
         request_id,
@@ -596,6 +636,7 @@ where
 /// - `domain_separator`: Domain separator used in the final Poseidon hash to derive the output
 /// - `auth`: Implementation specific authentication request forwarded to the delegate service as part of the request
 /// - `client`: The [`reqwest::Client`] used to send the request to the delegate service
+/// - `attestation`: with [`Attestation::EveryCall`], the delegate service is attested with `client` before the POST; a failure is [`Error::Attestation`] and nothing is sent
 ///
 /// # Timeout and Cancellation
 ///
@@ -615,6 +656,7 @@ pub async fn delegate_distributed_oprf<OprfRequestAuth>(
     domain_separator: ark_babyjubjub::Fq,
     auth: OprfRequestAuth,
     client: &reqwest::Client,
+    attestation: &Attestation,
 ) -> Result<VerifiableOprfOutput, Error>
 where
     OprfRequestAuth: Clone + Serialize + 'static,
@@ -632,6 +674,16 @@ where
         blinded_query: blinded_request.blinded_query(),
         auth,
     };
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Attestation::EveryCall { policy, .. } = attestation {
+        // the delegate call's own client: same TLS trust as the POST
+        attestation::attest(client, service, policy)
+            .await
+            .map_err(|err| Error::Attestation(vec![err]))?;
+    }
+    #[cfg(target_arch = "wasm32")]
+    let Attestation::OnDemand = attestation;
 
     // add client version to query params so the delegate service can check for compatibility
     let mut service = service.clone();
@@ -698,6 +750,7 @@ where
 /// - `request_id`: The UUID identifying this OPRF request, forwarded to all nodes
 /// - `req`: The already-blinded [`OprfRequest`] to send to every node
 /// - `connector`: TLS connector configuration for the WebSocket connections
+/// - `attestation`: with [`Attestation::EveryCall`], each node is attested before its session is opened (see [`init_sessions`])
 ///
 /// # Timeout and Cancellation
 /// Same considerations as [`distributed_oprf`] apply: no timeout is enforced internally, and dropping
@@ -715,6 +768,7 @@ pub async fn distributed_oprf_core<OprfRequestAuth>(
     threshold: usize,
     req: OprfRequest<OprfRequestAuth>,
     connector: Connector,
+    attestation: &Attestation,
 ) -> Result<
     (
         OprfPublicKey,
@@ -741,9 +795,10 @@ where
     let request_id = req.request_id;
 
     tracing::debug!("initializing sessions at {} services", services.len());
-    let sessions = sessions::init_sessions(request_id, services, threshold, req, connector)
-        .await
-        .map_err(|errors| aggregate_error(threshold, errors))?;
+    let sessions =
+        sessions::init_sessions(request_id, services, threshold, req, connector, attestation)
+            .await
+            .map_err(|errors| aggregate_error(threshold, errors))?;
 
     let oprf_public_key = sessions
         .oprf_public_keys
@@ -1219,6 +1274,7 @@ mod tests {
             ark_babyjubjub::Fq::ZERO,
             (),
             Connector::Plain,
+            &Attestation::OnDemand,
         )
         .await
         .expect_err("Should be an error");
@@ -1226,5 +1282,187 @@ mod tests {
             matches!(is_error, super::Error::NonUniqueServices),
             "Should be Error::NonUniqueServices"
         );
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(
+    clippy::unwrap_used,
+    clippy::missing_assert_message,
+    reason = "test code"
+)]
+mod attested_tests {
+    use std::{net::SocketAddr, sync::Arc};
+
+    use ark_ec::AdditiveGroup as _;
+    use axum::{
+        Router,
+        http::{HeaderMap, StatusCode},
+        routing::{get, post},
+    };
+    use rand::Rng as _;
+
+    use super::*;
+    use crate::attestation::{
+        AttestationError, AttestationFailure, AttestationPolicy,
+        test_support::{Chain, Events, TEST_PCR0, chain, deadline, kinds_of, serve, sign_now},
+    };
+
+    fn attestation_error(url: &str, failure: AttestationFailure) -> AttestationError {
+        AttestationError {
+            url: url.to_owned(),
+            failure,
+        }
+    }
+
+    #[test]
+    fn aggregate_error_reports_attestation() {
+        let service = || {
+            NodeError::ServiceError(ServiceError {
+                error_code: 1,
+                msg: None,
+                kind: OprfErrorKind::Unknown,
+            })
+        };
+        let first = attestation_error("ws://a.example", AttestationFailure::NotListed);
+        let second = attestation_error(
+            "ws://b.example",
+            AttestationFailure::Pcr0NotAllowed("bb".repeat(48)),
+        );
+        // the service errors alone would reach the threshold of 2
+        let errors = vec![
+            service(),
+            NodeError::Attestation(first.clone()),
+            NodeError::WsError(Box::new(std::io::Error::other("ws"))),
+            service(),
+            NodeError::Attestation(second.clone()),
+        ];
+
+        match aggregate_error(2, errors) {
+            Error::Attestation(all) => assert_eq!(all, vec![first, second]),
+            other => panic!("expected Error::Attestation, got {other:?}"),
+        }
+    }
+
+    /// A delegate node: `/attestation` records `(node, "attest", <x-client header>)`,
+    /// `POST /api/test/delegate` records `(node, "post", "")` and answers 500.
+    async fn delegate_node(name: &'static str, chain: Arc<Chain>, events: &Events) -> SocketAddr {
+        let attest_events = events.clone();
+        let post_events = events.clone();
+        let app = Router::new()
+            .route(
+                "/attestation",
+                get(
+                    move |headers: HeaderMap,
+                          axum::extract::Query(q): axum::extract::Query<
+                        HashMap<String, String>,
+                    >| {
+                        let client = headers
+                            .get("x-client")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("-")
+                            .to_owned();
+                        attest_events.lock().unwrap().push((name, "attest", client));
+                        let document = sign_now(&chain, &q["nonce"]);
+                        async move { document }
+                    },
+                ),
+            )
+            .route(
+                "/api/test/delegate",
+                post(move || {
+                    post_events
+                        .lock()
+                        .unwrap()
+                        .push((name, "post", String::new()));
+                    async { (StatusCode::INTERNAL_SERVER_ERROR, "delegate reached") }
+                }),
+            );
+        serve(app).await
+    }
+
+    fn marked_client(marker: &str) -> reqwest::Client {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert("x-client", marker.parse().unwrap());
+        reqwest::Client::builder()
+            .default_headers(headers)
+            .build()
+            .unwrap()
+    }
+
+    fn every_call(policy_text: &str, chain: &Chain) -> Attestation {
+        Attestation::EveryCall {
+            policy: Arc::new(
+                AttestationPolicy::parse(policy_text)
+                    .unwrap()
+                    .with_anchor(chain.root_der.clone()),
+            ),
+            http: marked_client("every-call"),
+        }
+    }
+
+    async fn delegate(
+        addr: SocketAddr,
+        attestation: &Attestation,
+    ) -> Result<VerifiableOprfOutput, Error> {
+        let mut rng = rand::thread_rng();
+        let url = to_delegate_oprf_url(&format!("http://{addr}"), "test").unwrap();
+        deadline(delegate_distributed_oprf(
+            &url,
+            rng.r#gen(),
+            BlindingFactor::rand(&mut rng),
+            ark_babyjubjub::Fq::ZERO,
+            (),
+            &marked_client("delegate"),
+            attestation,
+        ))
+        .await
+    }
+
+    #[tokio::test]
+    async fn delegate_every_call_attests_before_post() {
+        let chain = Arc::new(chain());
+        let events = Events::default();
+        let addr = delegate_node("d", chain.clone(), &events).await;
+        let attestation = every_call(
+            &format!("http://{addr} {}\n", hex::encode(TEST_PCR0)),
+            &chain,
+        );
+
+        let err = delegate(addr, &attestation).await.unwrap_err();
+
+        assert!(
+            matches!(err, Error::DelegateServerError { .. }),
+            "the POST was answered: {err:?}"
+        );
+        assert_eq!(kinds_of(&events, "d"), ["attest", "post"]);
+        let attest_client = events.lock().unwrap()[0].2.clone();
+        assert_eq!(
+            attest_client, "delegate",
+            "attestation uses the delegate call's own client"
+        );
+    }
+
+    #[tokio::test]
+    async fn delegate_attestation_failure_sends_no_post() {
+        let chain = Arc::new(chain());
+        let events = Events::default();
+        let addr = delegate_node("d", chain.clone(), &events).await;
+        let attestation = every_call(&format!("http://{addr} {}\n", "bb".repeat(48)), &chain);
+
+        let err = delegate(addr, &attestation).await.unwrap_err();
+
+        assert_eq!(kinds_of(&events, "d"), ["attest"], "no POST after failure");
+        match err {
+            Error::Attestation(all) => {
+                assert_eq!(all.len(), 1);
+                assert!(all[0].url.contains(&addr.to_string()), "{all:?}");
+                assert!(
+                    matches!(all[0].failure, AttestationFailure::Pcr0NotAllowed(_)),
+                    "{all:?}"
+                );
+            }
+            other => panic!("expected Error::Attestation, got {other:?}"),
+        }
     }
 }

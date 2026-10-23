@@ -215,6 +215,7 @@ async fn websocket_session_uses_pinned_connector() {
         1,
         oprf_request(),
         connector,
+        &oprf_client::Attestation::OnDemand,
     ))
     .await
     .err()
@@ -235,6 +236,7 @@ async fn websocket_session_uses_pinned_connector() {
         1,
         oprf_request(),
         connector,
+        &oprf_client::Attestation::OnDemand,
     ))
     .await
     .err()
@@ -269,6 +271,7 @@ async fn delegate_request_uses_pinned_client() {
                 ark_babyjubjub::Fq::rand(&mut rng),
                 "module".to_owned(),
                 &client,
+                &oprf_client::Attestation::OnDemand,
             )
             .await
         }

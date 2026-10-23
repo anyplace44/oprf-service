@@ -669,6 +669,7 @@ async fn delegate_happy_path() -> eyre::Result<()> {
         ark_babyjubjub::Fq::one(),
         auth,
         &client,
+        &taceo_oprf::client::Attestation::OnDemand,
     )
     .await?;
 

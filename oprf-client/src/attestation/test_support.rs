@@ -175,3 +175,75 @@ pub(crate) fn sign_with(chain: &Chain, fields: &Fields) -> Vec<u8> {
         Value::Bytes(signature.as_ref().to_vec()),
     ]))
 }
+
+/// What an in-process test node saw, in arrival order: `(node, kind, detail)`.
+pub(crate) type Events =
+    std::sync::Arc<std::sync::Mutex<Vec<(&'static str, &'static str, String)>>>;
+
+/// The `kind`s `node` recorded, in order.
+pub(crate) fn kinds_of(events: &Events, node: &str) -> Vec<&'static str> {
+    events
+        .lock()
+        .expect("events lock")
+        .iter()
+        .filter(|(n, _, _)| *n == node)
+        .map(|(_, kind, _)| *kind)
+        .collect()
+}
+
+/// A document over `nonce_hex` (as a node receives it), signed by `chain` now.
+pub(crate) fn sign_now(chain: &Chain, nonce_hex: &str) -> Vec<u8> {
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after 1970")
+        .as_millis()
+        .try_into()
+        .expect("ms fit u64");
+    sign_with(
+        chain,
+        &Fields {
+            nonce: Some(hex::decode(nonce_hex).expect("hex nonce")),
+            timestamp_ms,
+            ..Fields::default()
+        },
+    )
+}
+
+/// `GET /attestation` of test node `node`: records `(node, "attest", nonce)` and
+/// answers with [`sign_now`] (PCR0 is [`TEST_PCR0`]).
+pub(crate) fn attestation_route(
+    node: &'static str,
+    chain: std::sync::Arc<Chain>,
+    events: Events,
+) -> axum::routing::MethodRouter {
+    axum::routing::get(
+        move |axum::extract::Query(q): axum::extract::Query<
+            std::collections::HashMap<String, String>,
+        >| {
+            let nonce = q.get("nonce").cloned().unwrap_or_default();
+            events
+                .lock()
+                .expect("events lock")
+                .push((node, "attest", nonce.clone()));
+            let document = sign_now(&chain, &nonce);
+            async move { document }
+        },
+    )
+}
+
+/// Serves `app` on an ephemeral loopback port.
+pub(crate) async fn serve(app: axum::Router) -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
+    let addr = listener.local_addr().expect("local addr");
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    addr
+}
+
+/// Fails the test instead of hanging it.
+pub(crate) async fn deadline<T>(f: impl Future<Output = T>) -> T {
+    tokio::time::timeout(Duration::from_secs(10), f)
+        .await
+        .expect("test exceeded 10 s")
+}
