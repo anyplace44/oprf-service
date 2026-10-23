@@ -228,25 +228,43 @@ pub async fn start_service(
     reason = "test code"
 )]
 mod tests {
-    use std::{collections::HashMap, net::SocketAddr};
+    use std::collections::HashMap;
 
-    use super::env_source;
+    use super::{OprfNodeConfig, env_source};
 
-    fn launcher(env: HashMap<String, String>) -> Option<SocketAddr> {
-        let cfg = config::Config::builder()
+    fn load(extra: Option<(&str, &str)>) -> OprfNodeConfig {
+        let mut env = HashMap::from([
+            ("TACEO_OPRF_NODE__SERVICE__ENVIRONMENT", "dev"),
+            ("TACEO_OPRF_NODE__SERVICE__VERSION_REQ", ">=0.0.0"),
+            (
+                "TACEO_OPRF_NODE__POSTGRES__CONNECTION_STRING",
+                "postgres://x",
+            ),
+            ("TACEO_OPRF_NODE__NODE_URLS", "http://127.0.0.1:1"),
+        ]);
+        env.extend(extra);
+        let env = env
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        config::Config::builder()
             .add_source(env_source().source(Some(env)))
             .build()
-            .unwrap();
-        cfg.get("attestation_launcher").ok()
+            .unwrap()
+            .try_deserialize()
+            .unwrap()
     }
 
     #[test]
     fn config_reads_attestation_launcher() {
-        let env = HashMap::from([(
-            "TACEO_OPRF_NODE__ATTESTATION_LAUNCHER".to_owned(),
-            "127.0.0.1:9901".to_owned(),
-        )]);
-        assert_eq!(launcher(env), Some("127.0.0.1:9901".parse().unwrap()));
-        assert_eq!(launcher(HashMap::new()), None);
+        let cfg = load(Some((
+            "TACEO_OPRF_NODE__ATTESTATION_LAUNCHER",
+            "127.0.0.1:9901",
+        )));
+        assert_eq!(
+            cfg.attestation_launcher,
+            Some("127.0.0.1:9901".parse().unwrap())
+        );
+        assert_eq!(load(None).attestation_launcher, None);
     }
 }
