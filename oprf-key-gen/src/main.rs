@@ -47,6 +47,11 @@ struct OprfKeyGenConfig {
     /// How secrets are stored in the database; defaults to `direct` only.
     #[serde(default)]
     pub storage: StorageConfig,
+
+    /// Loopback address of the enclave launcher's attestation server. Without it
+    /// `GET /attestation` answers 503.
+    #[serde(default)]
+    pub attestation_launcher: Option<SocketAddr>,
 }
 
 fn default_bind_addr() -> SocketAddr {
@@ -130,6 +135,7 @@ async fn run(config: OprfKeyGenConfig) -> eyre::Result<()> {
 
     // Clone the values we need afterwards as well
     let bind_addr = config.bind_addr;
+    let attestation_launcher = config.attestation_launcher;
     let max_wait_time_shutdown = config.max_wait_time_shutdown;
 
     let (key_gen_router, key_gen_task) = taceo_oprf_key_gen::start(
@@ -141,6 +147,8 @@ async fn run(config: OprfKeyGenConfig) -> eyre::Result<()> {
     )
     .await
     .context("while initiating key-gen service")?;
+    let key_gen_router =
+        key_gen_router.merge(taceo_oprf_enclave_attestation::router(attestation_launcher));
 
     let server = tokio::spawn({
         let cancellation_token = cancellation_token.clone();
@@ -227,7 +235,14 @@ fn main() -> ExitCode {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::missing_assert_message,
+    reason = "test code"
+)]
 mod tests {
+    use std::collections::HashMap;
+
     use taceo_oprf_key_gen::config::WrappingKeyConfig;
 
     use super::*;
@@ -288,5 +303,23 @@ mod tests {
         ])
         .expect_err("write format direct is not allowed");
         assert!(err.to_string().contains("storage_write_format"), "{err}");
+    }
+
+    fn launcher(env: HashMap<String, String>) -> Option<SocketAddr> {
+        let cfg = config::Config::builder()
+            .add_source(env_source().source(Some(env)))
+            .build()
+            .unwrap();
+        cfg.get("attestation_launcher").ok()
+    }
+
+    #[test]
+    fn config_reads_attestation_launcher() {
+        let env = HashMap::from([(
+            "TACEO_OPRF_KEY_GEN__ATTESTATION_LAUNCHER".to_owned(),
+            "127.0.0.1:9901".to_owned(),
+        )]);
+        assert_eq!(launcher(env), Some("127.0.0.1:9901".parse().unwrap()));
+        assert_eq!(launcher(HashMap::new()), None);
     }
 }

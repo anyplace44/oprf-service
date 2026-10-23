@@ -42,6 +42,7 @@ nodes-common = { workspace = true, features = [
   "serde",
   "web3",
 ] }
+taceo-oprf-enclave-attestation = { path = "../oprf-enclave-attestation", features = ["router"] }
 oprf-core = { package = "taceo-oprf-core", path = "../oprf-core", version = "0.6" }
 oprf-store = { package = "taceo-oprf-store", path = "../oprf-store", version = "0.2", features = [
   "aws-kms",
