@@ -187,16 +187,25 @@ impl EnclaveConfig {
             .collect()
     }
 
-    /// `config public_sha256=<hex> secrets <KEY>=<hex> …`: SHA-256 of the public JSON text, then
-    /// one SHA-256 commitment per secret value, keys sorted.
+    /// SHA-256 of the public JSON text.
+    ///
+    /// # Panics
+    ///
+    /// Never: a SHA-256 digest is 32 bytes.
+    #[must_use]
+    pub fn public_sha256(&self) -> [u8; 32] {
+        digest::digest(&digest::SHA256, self.public_json.as_bytes())
+            .as_ref()
+            .try_into()
+            .expect("SHA-256 is 32 bytes")
+    }
+
+    /// `config public_sha256=<hex>`; secrets are never hashed into the log.
     #[must_use]
     pub fn hash_line(&self) -> String {
-        let mut line = format!(
-            "config public_sha256={} secrets",
-            sha256_hex(self.public_json.as_bytes())
-        );
-        for (key, value) in &self.secret_environment {
-            write!(line, " {key}={}", sha256_hex(value.as_bytes())).expect("String write");
+        let mut line = String::from("config public_sha256=");
+        for b in self.public_sha256() {
+            write!(line, "{b:02x}").expect("String write");
         }
         line
     }
@@ -218,16 +227,6 @@ fn without_values(e: &serde_json::Error) -> String {
     } else {
         msg
     }
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    digest::digest(&digest::SHA256, bytes).as_ref().iter().fold(
-        String::with_capacity(64),
-        |mut s, b| {
-            write!(s, "{b:02x}").expect("String write");
-            s
-        },
-    )
 }
 
 /// Refuses a blob written for another key than the one the parent named.
@@ -352,15 +351,6 @@ mod tests {
         })
         .to_string()
         .into_bytes()
-    }
-
-    fn sha256_hex(bytes: &[u8]) -> String {
-        Sha256::digest(bytes)
-            .iter()
-            .fold(String::new(), |mut s, b| {
-                write!(s, "{b:02x}").unwrap();
-                s
-            })
     }
 
     #[test]
@@ -540,28 +530,31 @@ mod tests {
     }
 
     #[test]
-    fn hash_line_is_public_sha256_and_sorted_commitments() {
+    fn hash_line_is_public_sha256_only() {
         let config = EnclaveConfig::from_json(BLOB.as_bytes()).unwrap();
         let expected = format!(
-            "config public_sha256={} secrets TACEO_OPRF_NODE__POSTGRES__CONNECTION_STRING={} TACEO_OPRF_NODE__TLS__KEY_PEM={}",
-            sha256_hex(PUBLIC.as_bytes()),
-            sha256_hex(DB_URL.as_bytes()),
-            sha256_hex(KEY_PEM.as_bytes()),
+            "config public_sha256={}",
+            hex(&Sha256::digest(PUBLIC.as_bytes()))
         );
         assert_eq!(config.hash_line(), expected);
     }
 
     #[test]
-    fn hash_line_without_secrets() {
-        let public = serde_json::json!({"environment": {}, "forwards": "", "kms_key_arn": ARN});
-        let config = EnclaveConfig::from_json(&blob(&public, &serde_json::json!({}))).unwrap();
+    fn public_sha256_matches_hash_line() {
+        let config = EnclaveConfig::from_json(BLOB.as_bytes()).unwrap();
+        let digest: [u8; 32] = Sha256::digest(PUBLIC.as_bytes()).into();
+        assert_eq!(config.public_sha256(), digest);
         assert_eq!(
             config.hash_line(),
-            format!(
-                "config public_sha256={} secrets",
-                sha256_hex(public.to_string().as_bytes())
-            )
+            format!("config public_sha256={}", hex(&config.public_sha256()))
         );
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().fold(String::new(), |mut s, b| {
+            write!(s, "{b:02x}").unwrap();
+            s
+        })
     }
 
     #[test]

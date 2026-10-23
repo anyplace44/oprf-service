@@ -17,7 +17,9 @@ use vsock::{VMADDR_CID_ANY, VsockListener, VsockStream};
 use crate::app;
 use crate::kms::decrypt_config;
 use crate::logpump::{PumpHandle, PumpOpts, spawn_pump};
+use crate::nsm;
 use crate::relay::{Stream, relay};
+use taceo_oprf_enclave_attestation::{LAUNCHER_ADDR, serve, user_data};
 use taceo_oprf_enclave_launcher::bootstrap::{
     BOOTSTRAP_PORT, Bootstrap, EnclaveConfig, LOG_PORT, check_key, combined_table, kms_forward_line,
 };
@@ -119,8 +121,26 @@ fn boot(logs: &PipeWriter) -> Result<ExitCode, String> {
         start_inbound(i)?;
     }
     log(&config.hash_line());
+    start_attestation(&config)?;
 
     run_app(&app::path()?, &config.app_environment(), logs)
+}
+
+/// Binds before the app starts, so a taken address fails the boot; each request is answered by
+/// a fresh NSM call binding the config's public hash and the caller's nonce.
+fn start_attestation(config: &EnclaveConfig) -> Result<(), String> {
+    let listener = TcpListener::bind(LAUNCHER_ADDR)
+        .map_err(|e| format!("attestation {LAUNCHER_ADDR}: {e}"))?;
+    let user_data = user_data(&config.public_sha256());
+    log(&format!("attestation on {LAUNCHER_ADDR}"));
+    thread::spawn(move || {
+        serve(
+            listener,
+            move |nonce| nsm::attestation(Some(user_data.clone()), Some(nonce.to_vec()), None),
+            log,
+        );
+    });
+    Ok(())
 }
 
 /// Starts the pump's reader before fd 2 points at the pipe: a pipe nobody drains would block
