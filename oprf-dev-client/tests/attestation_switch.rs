@@ -211,7 +211,11 @@ async fn init_error_names_attestation() {
     assert!(text.contains(&ws_url), "{text}");
     assert!(text.contains("503"), "{text}");
     assert_eq!(node.attestation_hits(), 1);
-    assert_eq!(node.other_hits(), 1, "the WebSocket route was hit");
+    assert_eq!(
+        node.other_hits(),
+        1,
+        "the WebSocket route was hit exactly once, not again after the failed attestation"
+    );
 }
 
 /// A dev client whose methods are never reached by the `attest` command.
