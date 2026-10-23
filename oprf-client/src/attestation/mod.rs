@@ -5,11 +5,17 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 mod document;
+#[cfg(not(target_arch = "wasm32"))]
+mod policy;
 #[cfg(all(test, not(target_arch = "wasm32")))]
 pub(crate) mod test_support;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use document::verify_document;
+#[cfg(not(target_arch = "wasm32"))]
+pub use policy::{
+    ATTESTATION_TIMEOUT, AttestationPolicy, Expected, MAX_DOCUMENT_BYTES, PolicyError, attest,
+};
 
 /// The facts of an attestation document that passed every check.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,4 +89,15 @@ pub enum AttestationFailure {
     /// The node is not listed in the expected-values file.
     #[error("node not listed in the attestation expected-values file")]
     NotListed,
+}
+
+/// An attestation failure together with the node it concerns.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("attestation of {url} failed: {failure}")]
+#[non_exhaustive]
+pub struct AttestationError {
+    /// The node's URL.
+    pub url: String,
+    /// The check that failed.
+    pub failure: AttestationFailure,
 }
