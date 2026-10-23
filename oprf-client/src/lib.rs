@@ -30,6 +30,7 @@ use tracing::instrument;
 use url::Url;
 use uuid::Uuid;
 
+pub mod attestation;
 mod sessions;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tls;
