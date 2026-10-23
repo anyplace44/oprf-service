@@ -14,6 +14,9 @@
 #   docker run --security-opt seccomp=build/enclave/seccomp-vsock.json \
 #     -p 4321:4321 -p 10000:10000 \
 #     -v /etc/oprf-enclave-host:/etc/oprf-enclave-host:ro <image>
+# An enclave's optional "inbound_tls" config entry makes the host terminate TLS
+# on one of its inbound ports; the certificate and key files live in the mounted
+# directory (the key readable by the container user, 65532).
 # The container reaches IMDS (`imds_url` in the config) over bridge
 # networking; the instance's metadata hop limit must be at least 2.
 # Regenerate it from the default that ships with the parent's Docker version:
