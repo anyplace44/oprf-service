@@ -1,0 +1,26 @@
+[package]
+name = "taceo-oprf-enclave-attestation"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+description = "Attestation protocol between a Nitro enclave app and its launcher: nonce and user_data formats, TCP server and client, HTTP route."
+readme.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+router = ["dep:axum", "dep:tokio"]
+
+[dependencies]
+axum = { workspace = true, optional = true }
+base64 = "0.23"
+tokio = { workspace = true, features = ["rt"], optional = true }
+
+[dev-dependencies]
+axum-test = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[lints]
+workspace = true
