@@ -21,7 +21,7 @@ use serde::Serialize;
 use tracing::instrument;
 use uuid::Uuid;
 
-use crate::Connector;
+use crate::{Attestation, Connector};
 
 /// Holds the active OPRF sessions with multiple nodes.
 #[derive(Default)]
@@ -96,18 +96,57 @@ impl OprfSessions {
 
 /// Tries to establish a web-socket connection to the given service. On success sends the provided `req` to the service and reads the [`OprfResponse`].
 ///
+/// With [`Attestation::EveryCall`], the service is attested first (fresh nonce); on failure
+/// nothing is opened and the error is [`NodeError::Attestation`].
+///
 /// Returns the [`WebSocketSession`] and the response on success.
-#[instrument(level = "trace", skip(req, connector))]
+#[instrument(level = "trace", skip(req, connector, attestation))]
 async fn init_session<Auth: Serialize>(
     service: Uri,
     request_id: Uuid,
     req: OprfRequest<Auth>,
     connector: Connector,
+    attestation: &Attestation,
 ) -> Result<(WebSocketSession, OprfResponse), NodeError> {
+    attest_service(&service, attestation).await?;
     let mut session = WebSocketSession::new(service, request_id, connector).await?;
     session.send(req).await?;
     let response = session.read::<OprfResponse>().await?;
     Ok((session, response))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn attest_service(service: &Uri, attestation: &Attestation) -> Result<(), NodeError> {
+    let Attestation::EveryCall { policy, http } = attestation else {
+        return Ok(());
+    };
+    let url = url::Url::parse(&service.to_string()).map_err(|err| {
+        NodeError::Attestation(crate::attestation::AttestationError {
+            url: service.to_string(),
+            failure: crate::attestation::AttestationFailure::Transport(format!("not a URL: {err}")),
+        })
+    })?;
+    match crate::attestation::attest(http, &url, policy).await {
+        Ok(Some(verified)) => {
+            tracing::debug!(%url, pcr0 = %hex::encode(verified.pcr0), "node attested");
+            Ok(())
+        }
+        Ok(None) => {
+            tracing::debug!(%url, "node listed as unattested, attestation skipped");
+            Ok(())
+        }
+        Err(err) => Err(NodeError::Attestation(err)),
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[expect(
+    clippy::unused_async,
+    reason = "same shape as the native attestation step"
+)]
+async fn attest_service(_service: &Uri, attestation: &Attestation) -> Result<(), NodeError> {
+    let Attestation::OnDemand = attestation;
+    Ok(())
 }
 
 /// Write the `req` request to the provided [`WebSocketSession`].
@@ -149,6 +188,10 @@ pub async fn finish_sessions(
 ///
 /// Nodes are queried concurrently. Errors from some services are logged and ignored, unless they prevent reaching the threshold.
 ///
+/// With [`Attestation::EveryCall`], each node is attested (fresh nonce) before its
+/// web-socket is opened; a node that fails attestation contributes a
+/// [`NodeError::Attestation`] and is not contacted further.
+///
 /// Returns a [`OprfSessions`] ready to be finalized with [`finish_sessions`].
 #[instrument(level = "debug", skip_all)]
 pub async fn init_sessions<OprfRequestAuth: Clone + Serialize + 'static>(
@@ -157,6 +200,7 @@ pub async fn init_sessions<OprfRequestAuth: Clone + Serialize + 'static>(
     threshold: usize,
     req: OprfRequest<OprfRequestAuth>,
     connector: Connector,
+    attestation: &Attestation,
 ) -> Result<OprfSessions, Vec<NodeError>> {
     let mut futures: FuturesUnordered<_> = oprf_services
         .iter()
@@ -165,7 +209,7 @@ pub async fn init_sessions<OprfRequestAuth: Clone + Serialize + 'static>(
             let req = req.clone();
             let service = service.to_owned();
             async move {
-                init_session(service.clone(), request_id, req, connector)
+                init_session(service.clone(), request_id, req, connector, attestation)
                     .await
                     .map_err(|err| (service, err))
             }
@@ -348,5 +392,247 @@ mod tests {
                 .expect("Has an authority")
                 .to_string()
         );
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[allow(
+    clippy::unwrap_used,
+    clippy::missing_assert_message,
+    reason = "test code"
+)]
+mod attested_tests {
+    use std::{net::SocketAddr, sync::Arc};
+
+    use axum::{
+        Router,
+        extract::{
+            WebSocketUpgrade,
+            ws::{Message, WebSocket},
+        },
+        routing::any,
+    };
+    use http::Uri;
+    use oprf_core::ddlog_equality::shamir::{DLogSessionShamir, DLogShareShamir};
+    use oprf_types::{
+        ShareEpoch,
+        api::{OprfPublicKeyWithEpoch, OprfRequest, OprfResponse},
+        crypto::{OprfPublicKey, PartyId},
+    };
+    use uuid::Uuid;
+
+    use crate::{
+        Attestation, NodeError,
+        attestation::{
+            AttestationFailure, AttestationPolicy,
+            test_support::{
+                Chain, Events, TEST_PCR0, attestation_route, chain, deadline, kinds_of, serve,
+            },
+        },
+        init_sessions,
+    };
+
+    const OTHER_PCR0: &str = "bb";
+
+    /// A node serving `/attestation` and the OPRF WebSocket; records `(node, "ws", "")`
+    /// when the upgrade request arrives.
+    async fn node(
+        name: &'static str,
+        party: u16,
+        chain: &Arc<Chain>,
+        events: &Events,
+    ) -> SocketAddr {
+        let ws_events = events.clone();
+        let app = Router::new()
+            .route(
+                "/attestation",
+                attestation_route(name, chain.clone(), events.clone()),
+            )
+            .route(
+                "/api/test/oprf",
+                any(move |ws: WebSocketUpgrade| {
+                    ws_events.lock().unwrap().push((name, "ws", String::new()));
+                    async move { ws.on_upgrade(move |socket| answer_init(socket, party)) }
+                }),
+            );
+        serve(app).await
+    }
+
+    async fn answer_init(mut socket: WebSocket, party: u16) {
+        let _request = socket.recv().await;
+        let response = OprfResponse {
+            commitments: DLogSessionShamir::partial_commitments(
+                rand::random(),
+                DLogShareShamir::from(rand::random::<ark_babyjubjub::Fr>()),
+                &mut rand::thread_rng(),
+            )
+            .1,
+            party_id: PartyId::from(party),
+            oprf_pub_key_with_epoch: OprfPublicKeyWithEpoch {
+                key: OprfPublicKey::from(rand::random::<ark_babyjubjub::EdwardsAffine>()),
+                epoch: ShareEpoch::default(),
+            },
+        };
+        let mut buf = Vec::new();
+        ciborium::into_writer(&response, &mut buf).unwrap();
+        if socket.send(Message::Binary(buf.into())).await.is_ok() {
+            let _closed = socket.recv().await;
+        }
+    }
+
+    fn ws_uri(addr: SocketAddr) -> Uri {
+        format!("ws://{addr}/api/test/oprf").parse().unwrap()
+    }
+
+    fn every_call(policy_text: &str, chain: &Chain) -> Attestation {
+        Attestation::EveryCall {
+            policy: Arc::new(
+                AttestationPolicy::parse(policy_text)
+                    .unwrap()
+                    .with_anchor(chain.root_der.clone()),
+            ),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    fn listed(addr: SocketAddr, pcr0_hex: &str) -> String {
+        format!("http://{addr} {pcr0_hex}\n")
+    }
+
+    async fn run(
+        services: &[Uri],
+        attestation: &Attestation,
+    ) -> Result<crate::OprfSessions, Vec<NodeError>> {
+        let req = OprfRequest {
+            request_id: Uuid::new_v4(),
+            blinded_query: rand::random::<ark_babyjubjub::EdwardsAffine>(),
+            auth: (),
+        };
+        deadline(init_sessions(
+            req.request_id,
+            services,
+            services.len(),
+            req,
+            tokio_tungstenite::Connector::Plain,
+            attestation,
+        ))
+        .await
+    }
+
+    fn attestation_failures(errors: &[NodeError]) -> Vec<(String, AttestationFailure)> {
+        errors
+            .iter()
+            .filter_map(|e| match e {
+                NodeError::Attestation(a) => Some((a.url.clone(), a.failure.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn every_call_attests_each_node_before_its_session() {
+        let chain = Arc::new(chain());
+        let events = Events::default();
+        let a = node("a", 1, &chain, &events).await;
+        let b = node("b", 2, &chain, &events).await;
+        let pcr = hex::encode(TEST_PCR0);
+        let attestation = every_call(&(listed(a, &pcr) + &listed(b, &pcr)), &chain);
+        let services = [ws_uri(a), ws_uri(b)];
+
+        let first = run(&services, &attestation).await;
+        assert!(first.is_ok(), "{:?}", first.err());
+        let second = run(&services, &attestation).await;
+        assert!(second.is_ok(), "{:?}", second.err());
+
+        for name in ["a", "b"] {
+            assert_eq!(
+                kinds_of(&events, name),
+                ["attest", "ws", "attest", "ws"],
+                "node {name}"
+            );
+        }
+        let nonces: Vec<String> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(n, k, _)| *n == "a" && *k == "attest")
+            .map(|(_, _, nonce)| nonce.clone())
+            .collect();
+        assert_eq!(nonces.len(), 2);
+        assert_ne!(nonces[0], nonces[1], "each call draws a fresh nonce");
+    }
+
+    #[tokio::test]
+    async fn failed_attestation_opens_no_session() {
+        let chain = Arc::new(chain());
+        let events = Events::default();
+        let a = node("a", 1, &chain, &events).await;
+        let b = node("b", 2, &chain, &events).await;
+        let text = listed(a, &hex::encode(TEST_PCR0)) + &listed(b, &OTHER_PCR0.repeat(48));
+        let attestation = every_call(&text, &chain);
+
+        let errors = run(&[ws_uri(a), ws_uri(b)], &attestation)
+            .await
+            .err()
+            .expect("node b must fail attestation");
+
+        assert_eq!(kinds_of(&events, "b"), ["attest"], "no session at b");
+        let failures = attestation_failures(&errors);
+        assert_eq!(failures.len(), 1, "{errors:?}");
+        assert!(failures[0].0.contains(&b.to_string()), "{failures:?}");
+        assert!(
+            matches!(failures[0].1, AttestationFailure::Pcr0NotAllowed(_)),
+            "{failures:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unattested_node_skips_attestation() {
+        let chain = Arc::new(chain());
+        let events = Events::default();
+        let a = node("a", 1, &chain, &events).await;
+        let b = node("b", 2, &chain, &events).await;
+        let text = listed(a, &hex::encode(TEST_PCR0)) + &format!("http://{b} unattested\n");
+        let attestation = every_call(&text, &chain);
+
+        let result = run(&[ws_uri(a), ws_uri(b)], &attestation).await;
+
+        assert!(result.is_ok(), "{:?}", result.err());
+        assert_eq!(kinds_of(&events, "a"), ["attest", "ws"]);
+        assert_eq!(kinds_of(&events, "b"), ["ws"]);
+    }
+
+    #[tokio::test]
+    async fn unlisted_node_is_refused() {
+        let chain = Arc::new(chain());
+        let events = Events::default();
+        let a = node("a", 1, &chain, &events).await;
+        let b = node("b", 2, &chain, &events).await;
+        let attestation = every_call(&listed(a, &hex::encode(TEST_PCR0)), &chain);
+
+        let errors = run(&[ws_uri(a), ws_uri(b)], &attestation)
+            .await
+            .err()
+            .expect("node b is not listed");
+
+        assert!(kinds_of(&events, "b").is_empty(), "b was contacted");
+        let failures = attestation_failures(&errors);
+        assert_eq!(failures.len(), 1, "{errors:?}");
+        assert!(failures[0].0.contains(&b.to_string()), "{failures:?}");
+        assert_eq!(failures[0].1, AttestationFailure::NotListed);
+    }
+
+    #[tokio::test]
+    async fn on_demand_never_calls_attestation() {
+        let chain = Arc::new(chain());
+        let events = Events::default();
+        let a = node("a", 1, &chain, &events).await;
+        let b = node("b", 2, &chain, &events).await;
+
+        let result = run(&[ws_uri(a), ws_uri(b)], &Attestation::OnDemand).await;
+
+        assert!(result.is_ok(), "{:?}", result.err());
+        assert_eq!(kinds_of(&events, "a"), ["ws"]);
+        assert_eq!(kinds_of(&events, "b"), ["ws"]);
     }
 }
