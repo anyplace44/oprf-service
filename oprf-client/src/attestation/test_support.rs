@@ -87,7 +87,21 @@ fn ca_params() -> CertificateParams {
     params
 }
 
+/// A fresh chain, for tests that need the anchor before the document exists.
+pub(crate) struct Chain {
+    pub(crate) root_der: Vec<u8>,
+    intermediate_der: Vec<u8>,
+    leaf_der: Vec<u8>,
+    leaf_key: KeyPair,
+}
+
 pub(crate) fn signed_document(fields: &Fields) -> (Vec<u8>, Vec<u8>) {
+    let chain = chain();
+    let document = sign_with(&chain, fields);
+    (document, chain.root_der)
+}
+
+pub(crate) fn chain() -> Chain {
     let root = CertifiedIssuer::self_signed(
         ca_params(),
         KeyPair::generate_for(&PKCS_ECDSA_P384_SHA384).expect("root key"),
@@ -105,7 +119,17 @@ pub(crate) fn signed_document(fields: &Fields) -> (Vec<u8>, Vec<u8>) {
         .signed_by(&leaf_key, &intermediate)
         .expect("leaf");
 
-    let root_der = root.as_ref().der().to_vec();
+    Chain {
+        root_der: root.as_ref().der().to_vec(),
+        intermediate_der: intermediate.as_ref().der().to_vec(),
+        leaf_der: leaf.der().to_vec(),
+        leaf_key,
+    }
+}
+
+pub(crate) fn sign_with(chain: &Chain, fields: &Fields) -> Vec<u8> {
+    let root_der = chain.root_der.clone();
+    let leaf_key = &chain.leaf_key;
     let opt_bytes = |b: &Option<Vec<u8>>| b.clone().map_or(Value::Null, Value::Bytes);
     let payload = encode(&Value::Map(vec![
         ("module_id".into(), TEST_MODULE_ID.into()),
@@ -118,12 +142,12 @@ pub(crate) fn signed_document(fields: &Fields) -> (Vec<u8>, Vec<u8>) {
                 (1.into(), Value::Bytes(vec![0; 48])),
             ]),
         ),
-        ("certificate".into(), Value::Bytes(leaf.der().to_vec())),
+        ("certificate".into(), Value::Bytes(chain.leaf_der.clone())),
         (
             "cabundle".into(),
             Value::Array(vec![
                 Value::Bytes(root_der.clone()),
-                Value::Bytes(intermediate.as_ref().der().to_vec()),
+                Value::Bytes(chain.intermediate_der.clone()),
             ]),
         ),
         ("public_key".into(), Value::Null),
@@ -144,11 +168,10 @@ pub(crate) fn signed_document(fields: &Fields) -> (Vec<u8>, Vec<u8>) {
         .sign(&SystemRandom::new(), &to_sign)
         .expect("ES384 signature");
 
-    let document = encode(&Value::Array(vec![
+    encode(&Value::Array(vec![
         Value::Bytes(fields.protected.clone()),
         Value::Map(Vec::new()),
         Value::Bytes(payload),
         Value::Bytes(signature.as_ref().to_vec()),
-    ]));
-    (document, root_der)
+    ]))
 }
