@@ -59,6 +59,11 @@ pub struct OprfNodeConfig {
     /// Without it the usual webpki-roots verification applies.
     #[serde(default)]
     pub tls_pinned_certs: Option<String>,
+
+    /// Loopback address of the enclave launcher's attestation server. Without it
+    /// `GET /attestation` answers 503.
+    #[serde(default)]
+    pub attestation_launcher: Option<SocketAddr>,
 }
 
 fn default_bind_addr() -> SocketAddr {
@@ -69,20 +74,22 @@ fn default_max_wait_shutdown() -> Duration {
     Duration::from_secs(10)
 }
 
+fn env_source() -> Environment {
+    Environment::with_prefix("TACEO_OPRF_NODE")
+        .separator("__")
+        .list_separator(",")
+        .with_list_parse_key("rpc.http_urls")
+        .with_list_parse_key("node_urls")
+        .try_parsing(true)
+}
+
 /// Loads the node configuration from the environment.
 ///
 /// # Errors
 ///
 /// Returns an error if the environment configuration cannot be built or parsed.
 pub fn load_example_config() -> eyre::Result<OprfNodeConfig> {
-    let cfg = Config::builder().add_source(
-        Environment::with_prefix("TACEO_OPRF_NODE")
-            .separator("__")
-            .list_separator(",")
-            .with_list_parse_key("rpc.http_urls")
-            .with_list_parse_key("node_urls")
-            .try_parsing(true),
-    );
+    let cfg = Config::builder().add_source(env_source());
 
     cfg.build()
         .context("while building from config")?
@@ -170,7 +177,10 @@ pub async fn start_service(
         oprf_client::to_oprf_uri_many(config.node_urls, "example")?,
         delegate_connector,
     )
-    .build();
+    .build()
+    .merge(taceo_oprf_enclave_attestation::router(
+        config.attestation_launcher,
+    ));
 
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     let axum_cancel_token = cancellation_token.clone();
@@ -208,5 +218,35 @@ pub async fn start_service(
         }
         Ok(Err(err)) => Err(eyre::Report::from(err)),
         Err(_) => eyre::bail!("could not finish shutdown in time"),
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::missing_assert_message,
+    reason = "test code"
+)]
+mod tests {
+    use std::{collections::HashMap, net::SocketAddr};
+
+    use super::env_source;
+
+    fn launcher(env: HashMap<String, String>) -> Option<SocketAddr> {
+        let cfg = config::Config::builder()
+            .add_source(env_source().source(Some(env)))
+            .build()
+            .unwrap();
+        cfg.get("attestation_launcher").ok()
+    }
+
+    #[test]
+    fn config_reads_attestation_launcher() {
+        let env = HashMap::from([(
+            "TACEO_OPRF_NODE__ATTESTATION_LAUNCHER".to_owned(),
+            "127.0.0.1:9901".to_owned(),
+        )]);
+        assert_eq!(launcher(env), Some("127.0.0.1:9901".parse().unwrap()));
+        assert_eq!(launcher(HashMap::new()), None);
     }
 }
