@@ -32,7 +32,7 @@ pub fn acceptor(cert_pem: &str, key_pem: &str) -> eyre::Result<TlsAcceptor> {
         .context("selecting TLS protocol versions")?
         .with_no_client_auth()
         .with_single_cert(certs, key)
-        .context("TLS key does not match the certificate")?;
+        .map_err(|err| eyre::eyre!("TLS certificate and key rejected: {err}"))?;
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
@@ -52,7 +52,7 @@ mod tests {
         let (_, other_key) = pems();
         acceptor(&cert, &key).expect("matching pair");
         let err = acceptor(&cert, &other_key).err().expect("mismatch");
-        assert!(format!("{err:#}").contains("does not match"), "{err:#}");
+        assert!(format!("{err:#}").contains("KeyMismatch"), "{err:#}");
         assert!(acceptor("", &key).is_err(), "no certificate");
         assert!(acceptor(&cert, "").is_err(), "no key");
     }

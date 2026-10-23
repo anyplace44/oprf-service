@@ -123,7 +123,7 @@ fn handle(
                 format!("ok {}\n", STANDARD.encode(doc))
             }
             Err(msg) => {
-                log(&format!("attestation failed: {msg}"));
+                log(&format!("attestation failed: {}", one_line(&msg)));
                 format!("error {}\n", one_line(&msg))
             }
         },
@@ -170,8 +170,8 @@ pub fn serve(
 /// Asks the launcher at `addr` for an attestation document bound to `nonce`.
 ///
 /// # Errors
-/// Returns a message on connection failure, timeout (`timeout` bounds the whole
-/// exchange), an `error` reply from the launcher, or a malformed reply.
+/// Returns a message on connection failure, timeout (`timeout` bounds each of the
+/// connect, write and read phases, not their sum), an `error` reply from the launcher, or a malformed reply.
 pub fn request_document(
     addr: SocketAddr,
     nonce: &[u8; 32],
