@@ -5,6 +5,7 @@ members = [
   "oprf-client",
   "oprf-core",
   "oprf-dev-client",
+  "oprf-enclave-attestation",
   "oprf-enclave-host",
   "oprf-enclave-launcher",
   "oprf-key-gen",

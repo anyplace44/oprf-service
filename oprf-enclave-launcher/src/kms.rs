@@ -9,8 +9,6 @@
 
 use std::time::Duration;
 
-use aws_nitro_enclaves_nsm_api::api::{Request, Response};
-use aws_nitro_enclaves_nsm_api::driver::{nsm_exit, nsm_init, nsm_process_request};
 use aws_sdk_kms::config::timeout::TimeoutConfig;
 use aws_sdk_kms::config::{BehaviorVersion, Credentials, Region, SharedHttpClient};
 use aws_sdk_kms::error::{DisplayErrorContext, ProvideErrorMetadata as _};
@@ -23,6 +21,8 @@ use base64::engine::general_purpose::STANDARD;
 use taceo_oprf_enclave_launcher::bootstrap::{Bootstrap, kms_region};
 use taceo_oprf_enclave_launcher::recipient::RecipientKey;
 
+use crate::nsm;
+
 /// Bounds the whole call, retries included, so a stalled KMS path fails the launcher instead
 /// of hanging it.
 const DECRYPT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -32,33 +32,13 @@ const DECRYPT_TIMEOUT: Duration = Duration::from_secs(30);
 pub(crate) fn decrypt_config(bootstrap: &Bootstrap, key_arn: &str) -> Result<Vec<u8>, String> {
     let region = kms_region(key_arn)?;
     let key = RecipientKey::generate()?;
-    let document = attest(key.public_key_der())?;
+    let document = nsm::attestation(None, None, Some(key.public_key_der()))?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| format!("tokio runtime: {e}"))?;
     let envelope = runtime.block_on(kms_decrypt(bootstrap, region, key_arn, document))?;
     key.decrypt_envelope(&envelope)
-}
-
-fn attest(public_key: Vec<u8>) -> Result<Vec<u8>, String> {
-    let fd = nsm_init();
-    if fd < 0 {
-        return Err("cannot open /dev/nsm".to_owned());
-    }
-    let response = nsm_process_request(
-        fd,
-        Request::Attestation {
-            user_data: None,
-            nonce: None,
-            public_key: Some(public_key.into()),
-        },
-    );
-    nsm_exit(fd);
-    match response {
-        Response::Attestation { document } => Ok(document),
-        other => Err(format!("NSM attestation: {other:?}")),
-    }
 }
 
 async fn kms_decrypt(

@@ -26,6 +26,7 @@ config = { workspace = true }
 eyre.workspace = true
 humantime-serde = { workspace = true }
 nodes-common = { workspace = true, features = ["postgres", "serde"] }
+taceo-oprf-enclave-attestation = { path = "../oprf-enclave-attestation", features = ["router"] }
 oprf-client = { package = "taceo-oprf-client", path = "../oprf-client", version = "0.10" }
 oprf-service = { package = "taceo-oprf-service", path = "../oprf-service", version = "0.19" }
 oprf-types = { package = "taceo-oprf-types", path = "../oprf-types", version = "0.16" }
