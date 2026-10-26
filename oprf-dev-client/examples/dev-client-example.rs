@@ -2,7 +2,7 @@ use alloy::{primitives::U160, providers::DynProvider};
 use ark_ff::{PrimeField as _, UniformRand as _};
 use clap::Parser;
 use eyre::{Context, ContextCompat};
-use oprf_client::Connector;
+use oprf_client::{Attestation, Connector};
 use oprf_core::oprf::BlindingFactor;
 use oprf_types::{
     OprfKeyId, ShareEpoch, api::OprfRequest, async_trait::async_trait, crypto::OprfPublicKey,
@@ -77,7 +77,7 @@ impl DevClient for ExampleDevClient {
             let (oprf_key_id, oprf_public_key) = taceo_oprf_dev_client::init_key_gen(
                 client,
                 &config.nodes,
-                config.oprf_key_registry_contract,
+                config.registry()?,
                 provider,
                 config.max_wait_time,
             )
@@ -95,6 +95,7 @@ impl DevClient for ExampleDevClient {
         config: &DevClientConfig,
         setup: Self::Setup,
         connector: Connector,
+        attestation: &Attestation,
     ) -> eyre::Result<ShareEpoch> {
         let mut rng = rand_chacha::ChaCha12Rng::from_entropy();
 
@@ -114,6 +115,7 @@ impl DevClient for ExampleDevClient {
             domain_separator,
             auth,
             connector,
+            attestation,
         )
         .await?;
 
@@ -126,6 +128,7 @@ impl DevClient for ExampleDevClient {
         setup: Self::Setup,
         delegate_service: Option<String>,
         client: &reqwest::Client,
+        attestation: &Attestation,
     ) -> eyre::Result<ShareEpoch> {
         let mut rng = rand_chacha::ChaCha12Rng::from_entropy();
 
@@ -155,6 +158,7 @@ impl DevClient for ExampleDevClient {
             domain_separator,
             auth,
             client,
+            attestation,
         )
         .await?;
 

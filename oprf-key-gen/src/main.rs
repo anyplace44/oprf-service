@@ -40,6 +40,11 @@ struct OprfKeyGenConfig {
     /// Postgres config used by the shared [`PostgresDb`] backend (secret manager and chain cursor store).
     #[serde(rename = "postgres")]
     pub postgres_config: PostgresConfig,
+
+    /// Loopback address of the enclave launcher's attestation server. Without it
+    /// `GET /attestation` answers 503.
+    #[serde(default)]
+    pub attestation_launcher: Option<SocketAddr>,
 }
 
 fn default_bind_addr() -> SocketAddr {
@@ -50,16 +55,18 @@ fn default_max_wait_shutdown() -> Duration {
     Duration::from_secs(10)
 }
 
+fn env_source() -> config::Environment {
+    config::Environment::with_prefix("TACEO_OPRF_KEY_GEN")
+        .separator("__")
+        .list_separator(",")
+        .with_list_parse_key("service.rpc.http_urls")
+        .try_parsing(true)
+}
+
 // we are not allowed to build an eyre::Report yet because telemetry-batteries expects to install
 // the color-eyre hook
 fn load_key_gen_config() -> Result<OprfKeyGenConfig, config::ConfigError> {
-    let cfg = Config::builder().add_source(
-        config::Environment::with_prefix("TACEO_OPRF_KEY_GEN")
-            .separator("__")
-            .list_separator(",")
-            .with_list_parse_key("service.rpc.http_urls")
-            .try_parsing(true),
-    );
+    let cfg = Config::builder().add_source(env_source());
 
     let key_gen_config = cfg.build()?.try_deserialize()?;
 
@@ -98,6 +105,7 @@ async fn run(config: OprfKeyGenConfig) -> eyre::Result<()> {
 
     // Clone the values we need afterwards as well
     let bind_addr = config.bind_addr;
+    let attestation_launcher = config.attestation_launcher;
     let max_wait_time_shutdown = config.max_wait_time_shutdown;
 
     let (key_gen_router, key_gen_task) = taceo_oprf_key_gen::start(
@@ -109,6 +117,8 @@ async fn run(config: OprfKeyGenConfig) -> eyre::Result<()> {
     )
     .await
     .context("while initiating key-gen service")?;
+    let key_gen_router =
+        key_gen_router.merge(taceo_oprf_enclave_attestation::router(attestation_launcher));
 
     let server = tokio::spawn({
         let cancellation_token = cancellation_token.clone();
@@ -192,4 +202,67 @@ fn main() -> ExitCode {
             }
         }
     })
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::missing_assert_message,
+    reason = "test code"
+)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{OprfKeyGenConfig, env_source};
+
+    fn load(extra: Option<(&str, &str)>) -> OprfKeyGenConfig {
+        let mut env = HashMap::from([
+            ("TACEO_OPRF_KEY_GEN__SERVICE__ENVIRONMENT", "dev"),
+            ("TACEO_OPRF_KEY_GEN__SERVICE__WALLET_PRIVATE_KEY", "00"),
+            (
+                "TACEO_OPRF_KEY_GEN__SERVICE__OPRF_KEY_REGISTRY_CONTRACT",
+                "0x0000000000000000000000000000000000000001",
+            ),
+            ("TACEO_OPRF_KEY_GEN__SERVICE__ZKEY_PATH", "/x"),
+            ("TACEO_OPRF_KEY_GEN__SERVICE__WITNESS_GRAPH_PATH", "/x"),
+            ("TACEO_OPRF_KEY_GEN__SERVICE__EXPECTED_NUM_PEERS", "3"),
+            ("TACEO_OPRF_KEY_GEN__SERVICE__EXPECTED_THRESHOLD", "2"),
+            (
+                "TACEO_OPRF_KEY_GEN__SERVICE__RPC__HTTP_URLS",
+                "http://127.0.0.1:1",
+            ),
+            (
+                "TACEO_OPRF_KEY_GEN__SERVICE__WS_RPC_URL",
+                "ws://127.0.0.1:1",
+            ),
+            (
+                "TACEO_OPRF_KEY_GEN__POSTGRES__CONNECTION_STRING",
+                "postgres://x",
+            ),
+        ]);
+        env.extend(extra);
+        let env = env
+            .into_iter()
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        config::Config::builder()
+            .add_source(env_source().source(Some(env)))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap()
+    }
+
+    #[test]
+    fn config_reads_attestation_launcher() {
+        let cfg = load(Some((
+            "TACEO_OPRF_KEY_GEN__ATTESTATION_LAUNCHER",
+            "127.0.0.1:9901",
+        )));
+        assert_eq!(
+            cfg.attestation_launcher,
+            Some("127.0.0.1:9901".parse().unwrap())
+        );
+        assert_eq!(load(None).attestation_launcher, None);
+    }
 }
