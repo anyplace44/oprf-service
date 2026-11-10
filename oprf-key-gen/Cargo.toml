@@ -35,7 +35,7 @@ backon = { workspace = true, features = ["std", "tokio-sleep"] }
 config = { workspace = true }
 eyre.workspace = true
 futures = { workspace = true }
-groth16-material = { workspace = true, features = ["circom"] }
+groth16-material = { workspace = true, features = ["circom", "parallel"] }
 humantime-serde = { workspace = true }
 itertools = { workspace = true }
 metrics = { workspace = true }
@@ -45,6 +45,7 @@ nodes-common = { workspace = true, features = [
   "serde",
   "web3",
 ] }
+taceo-oprf-enclave-attestation = { path = "../oprf-enclave-attestation", features = ["router"] }
 oprf-core = { package = "taceo-oprf-core", path = "../oprf-core", version = "0.6" }
 oprf-types = { package = "taceo-oprf-types", path = "../oprf-types", version = "0.16", features = [
   "chain",

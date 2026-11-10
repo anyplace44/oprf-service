@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use alloy::primitives::Address;
 use clap::{Parser, Subcommand};
@@ -50,6 +50,8 @@ pub enum Command {
     StressTestOprf(StressTestOprfCommand),
     StressTestKeyGen(StressTestKeyGenCommand),
     ReshareTest(ReshareTest),
+    /// Attest every node listed with a PCR0 in `--attestation-pcrs` and print what it proved.
+    Attest,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -68,8 +70,10 @@ pub struct DevClientConfig {
     pub threshold: usize,
 
     /// The Address of the OprfKeyRegistry contract.
+    ///
+    /// Required by every command except `attest`.
     #[clap(long, env = "OPRF_DEV_CLIENT_OPRF_KEY_REGISTRY_CONTRACT")]
-    pub oprf_key_registry_contract: Address,
+    pub oprf_key_registry_contract: Option<Address>,
 
     /// The RPC for chain communication
     #[clap(
@@ -97,7 +101,42 @@ pub struct DevClientConfig {
     #[clap(long, env = "OPRF_DEV_CLIENT_WAIT_TIME", default_value="2min", value_parser=humantime::parse_duration)]
     pub max_wait_time: Duration,
 
+    /// PEM file with the certificates to pin for TLS connections to the nodes.
+    ///
+    /// A node is accepted only if it presents exactly one of these certificates (no hostname
+    /// check, no CA fallback). Without it, the usual webpki roots apply.
+    #[clap(long, env = "OPRF_DEV_CLIENT_TLS_PINNED_CERTS")]
+    pub tls_pinned_certs: Option<PathBuf>,
+
+    /// Skip the startup health check of all nodes.
+    #[clap(long, env = "OPRF_DEV_CLIENT_SKIP_HEALTH_CHECK")]
+    pub skip_health_check: bool,
+
+    /// Attest every node before every OPRF call (needs `--attestation-pcrs`).
+    #[clap(long, env = "OPRF_DEV_CLIENT_ATTEST_EVERY_CALL")]
+    pub attest_every_call: bool,
+
+    /// Expected-values file for attestation: `<base url> <pcr0 hex>` or `<base url> unattested`
+    /// per line.
+    #[clap(long, env = "OPRF_DEV_CLIENT_ATTESTATION_PCRS")]
+    pub attestation_pcrs: Option<PathBuf>,
+
     /// Command
     #[command(subcommand)]
     pub command: Command,
+}
+
+impl DevClientConfig {
+    /// The `OprfKeyRegistry` contract address.
+    ///
+    /// # Errors
+    /// If it is not set.
+    pub fn registry(&self) -> eyre::Result<Address> {
+        self.oprf_key_registry_contract.ok_or_else(|| {
+            eyre::eyre!(
+                "this command needs the OprfKeyRegistry contract: set \
+                 --oprf-key-registry-contract / OPRF_DEV_CLIENT_OPRF_KEY_REGISTRY_CONTRACT"
+            )
+        })
+    }
 }
