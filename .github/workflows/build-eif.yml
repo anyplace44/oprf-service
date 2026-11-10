@@ -2,8 +2,10 @@ name: Build EIF
 
 # Reproducible AWS Nitro Enclave image: two independent runners build the
 # `eif` target of the given Dockerfile with no cache, the EIF and its PCRs
-# must match byte for byte. The EIF stays a run artifact on branches and PRs;
-# on an `<image-name>-v*` tag the verified EIF and its PCRs are published as a
+# must match byte for byte. Outside pull requests the verified EIF and its
+# PCRs get a signed build provenance attestation (GitHub artifact
+# attestations). The EIF stays a run artifact on branches and PRs; on an
+# `<image-name>-v*` tag the attested EIF and its PCRs are published as a
 # GitHub release. linux/amd64 only.
 
 on:
@@ -128,10 +130,58 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-  release:
-    if: github.event_name == 'push' && startsWith(github.ref, format('refs/tags/{0}-v', inputs.image-name))
+  attest:
+    # Signs "these files were built by this workflow from this commit" with the
+    # run's OIDC identity (Sigstore). The attestation lives in GitHub's
+    # attestation store, the EIF and its PCRs are not modified. Pull requests
+    # only prove reproducibility; fork PRs get no OIDC token anyway.
+    if: github.event_name != 'pull_request'
     needs:
       - verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Sigstore signing certificate
+      attestations: write
+    env:
+      NAME: ${{ inputs.image-name }}
+    steps:
+      - name: Download primary EIF
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ${{ inputs.image-name }}-eif-primary
+          path: ${{ runner.temp }}/eif
+
+      - name: Attest build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/eif/${{ inputs.image-name }}.eif
+            ${{ runner.temp }}/eif/${{ inputs.image-name }}.pcrs
+
+      - name: Summary
+        shell: bash
+        run: |
+          # The certificate names the workflow that ran the attest job, i.e.
+          # this reusable workflow, not its caller.
+          signer="${{ github.repository }}/.github/workflows/build-eif.yml"
+          {
+            echo "### $NAME EIF attestation"
+            echo
+            echo "Verify the build provenance of the EIF and of its PCRs file (from this run's \`$NAME-eif-primary\` artifact, the release, or a rebuild):"
+            echo
+            echo '```sh'
+            echo "gh attestation verify $NAME.eif --repo ${{ github.repository }} --signer-workflow $signer"
+            echo "gh attestation verify $NAME.pcrs --repo ${{ github.repository }} --signer-workflow $signer"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    if: github.event_name == 'push' && startsWith(github.ref, format('refs/tags/{0}-v', inputs.image-name))
+    # After attest, so a published release always has a provenance attestation.
+    needs:
+      - verify
+      - attest
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -160,6 +210,13 @@ jobs:
             echo "eif_pcr0=$pcr0"
             echo
             echo "The EIF holds no account, region or key name. Full PCRs are in \`$NAME.pcrs\`."
+            echo
+            echo "Both files carry a signed build provenance attestation:"
+            echo
+            echo '```sh'
+            echo "gh attestation verify $NAME.eif --repo $GH_REPO --signer-workflow $GH_REPO/.github/workflows/build-eif.yml"
+            echo "gh attestation verify $NAME.pcrs --repo $GH_REPO --signer-workflow $GH_REPO/.github/workflows/build-eif.yml"
+            echo '```'
           } > notes.md
           # Re-runs of the same tag replace the assets (the build is reproducible,
           # so they are identical) instead of failing on the existing release.

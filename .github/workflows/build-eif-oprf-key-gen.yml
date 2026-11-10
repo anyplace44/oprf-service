@@ -30,9 +30,11 @@ permissions:
 jobs:
   workflow:
     # A reusable workflow cannot exceed its caller's permissions; only its
-    # release job uses contents: write.
+    # release job uses contents: write, only its attest job the other two.
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     uses: ./.github/workflows/build-eif.yml
     with:
       image-name: oprf-key-gen
