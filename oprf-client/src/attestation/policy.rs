@@ -345,7 +345,10 @@ mod tests {
     };
 
     use axum::{Router, extract::Query, http::StatusCode, routing::get};
-    use tokio::{io::AsyncWriteExt, net::TcpListener};
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
     use url::Url;
 
     use super::*;
@@ -615,6 +618,14 @@ mod tests {
         tokio::spawn(async move {
             let mut held = Vec::new();
             while let Ok((mut s, _)) = listener.accept().await {
+                // Wait for the request head before answering: bytes that reach
+                // hyper's connection while it is still idle fail the request
+                // with "received unexpected message" instead of stalling it.
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") && s.read(&mut byte).await.unwrap_or(0) == 1 {
+                    request.push(byte[0]);
+                }
                 s.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\n\r\nab")
                     .await
                     .unwrap();
