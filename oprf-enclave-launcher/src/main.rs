@@ -37,7 +37,7 @@ fn main() -> std::process::ExitCode {
 }
 
 #[cfg(not(target_os = "linux"))]
-#[expect(clippy::missing_const_for_fn, reason = "entry point stub")]
+#[allow(clippy::missing_const_for_fn, reason = "entry point stub; lints only in the test build")]
 fn main() -> std::process::ExitCode {
     std::process::ExitCode::FAILURE
 }
