@@ -8,7 +8,8 @@ name: Build and Push
 # Each platform is built, verified and pushed on its own as a single-platform
 # image, so the measured digest of one never depends on the other. amd64 keeps
 # the plain tags, arm64 gets a `-arm64` suffix. All builds run on amd64
-# runners: the Dockerfile cross-compiles arm64.
+# runners: the Dockerfile cross-compiles arm64. Callers whose Dockerfile does
+# not cross-compile restrict `archs` to amd64.
 #
 # After the push, the digest gets a signed build provenance and SBOM
 # attestation (GitHub artifact attestations, Sigstore), which links it to the
@@ -25,6 +26,11 @@ on:
         description: 'Path to the Dockerfile'
         required: true
         type: string
+      archs:
+        description: 'JSON list of architectures to build; images whose Dockerfile cannot cross-compile pass ["amd64"]'
+        required: false
+        type: string
+        default: '["amd64", "arm64"]'
     secrets:
       AWS_ARCHIVE_ROLE:
         description: 'AWS role used for the SBOM upload role assumption'
@@ -49,7 +55,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64]
+        arch: ${{ fromJSON(inputs.archs) }}
         builder: [primary, verify]
         include:
           - builder: primary
@@ -174,7 +180,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64]
+        arch: ${{ fromJSON(inputs.archs) }}
     env:
       PREFIX: ${{ inputs.image-name }}-${{ matrix.arch }}
     runs-on: ubuntu-latest
@@ -287,7 +293,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64]
+        arch: ${{ fromJSON(inputs.archs) }}
     env:
       PREFIX: ${{ inputs.image-name }}-${{ matrix.arch }}
     runs-on: ubuntu-latest
