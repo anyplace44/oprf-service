@@ -233,15 +233,15 @@ struct Reader<'a> {
 }
 
 impl<'a> Reader<'a> {
-    fn new(rest: &'a [u8], depth: usize) -> Self {
+    const fn new(rest: &'a [u8], depth: usize) -> Self {
         Self { rest, depth }
     }
 
-    fn is_empty(&self) -> bool {
+    const fn is_empty(&self) -> bool {
         self.rest.is_empty()
     }
 
-    fn peek_tag(&self) -> Option<u8> {
+    const fn peek_tag(&self) -> Option<u8> {
         self.rest.first().copied()
     }
 
